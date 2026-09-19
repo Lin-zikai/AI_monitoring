@@ -27,7 +27,11 @@ export const hostKeyFingerprint = (key: Buffer) => `SHA256:${createHash('sha256'
 
 export function describePrivateKey(privateKey: string, passphrase?: string): { fingerprint: string; keyType: string } {
   const parsed = utils.parseKey(privateKey, passphrase);
-  if (parsed instanceof Error) throw new Error('无法解析私钥（格式不支持或口令错误）');
+  if (parsed instanceof Error) {
+    if (/no passphrase given/i.test(parsed.message)) throw new Error('该私钥有口令保护，请在“私钥口令”中填写口令');
+    if (/bad passphrase|integrity check failed/i.test(parsed.message)) throw new Error('私钥口令不正确');
+    throw new Error('无法解析私钥：请粘贴完整的 OpenSSH / PEM 格式私钥（包含 BEGIN 与 END 两行）');
+  }
   const key = Array.isArray(parsed) ? parsed[0] : parsed;
   if (!key || !key.isPrivateKey()) throw new Error('提供的内容不是私钥');
   return { fingerprint: hostKeyFingerprint(key.getPublicSSH()), keyType: key.type };

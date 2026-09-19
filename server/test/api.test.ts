@@ -138,6 +138,21 @@ describe('凭据管理', () => {
     expect(auditLog.body).not.toContain('PRIVATE KEY');
   });
 
+  it('带口令的私钥：缺口令与口令错误给出明确提示，口令正确则保存', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
+    const dir = mkdtempSync('/tmp/usage-monitor-key-');
+    execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', 'key-pass-123', '-Z', 'aes256-cbc', '-f', `${dir}/k`]);
+    const privateKey = readFileSync(`${dir}/k`, 'utf8');
+    rmSync(dir, { recursive: true });
+
+    const missing = await send('POST', '/api/credentials', adminCookie, { name: 'enc', privateKey });
+    expect([missing.statusCode, missing.json().error]).toEqual([400, '该私钥有口令保护，请在“私钥口令”中填写口令']);
+    const wrong = await send('POST', '/api/credentials', adminCookie, { name: 'enc', privateKey, passphrase: 'nope' });
+    expect([wrong.statusCode, wrong.json().error]).toEqual([400, '私钥口令不正确']);
+    expect((await send('POST', '/api/credentials', adminCookie, { name: 'enc', privateKey, passphrase: 'key-pass-123' })).statusCode).toBe(201);
+  });
+
   it('拒绝无法解析的私钥', async () => {
     expect((await send('POST', '/api/credentials', adminCookie, { name: 'bad', privateKey: 'not-a-key'.repeat(10) })).statusCode).toBe(400);
   });

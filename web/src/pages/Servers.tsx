@@ -18,6 +18,29 @@ const { Text, Paragraph } = Typography;
 
 const MAX_KEY_FILE_BYTES = 20_000;
 
+/** 私钥是否带口令保护（只看明文头部，不涉及密钥内容）。 */
+function isEncryptedKey(text: string | undefined): boolean {
+  if (!text) return false;
+  if (/Proc-Type:\s*4,ENCRYPTED|BEGIN ENCRYPTED PRIVATE KEY/.test(text)) return true; // 传统 PEM / PKCS#8
+  const m = /-----BEGIN OPENSSH PRIVATE KEY-----([\s\S]*?)-----END/.exec(text);
+  if (!m) return false;
+  try {
+    // openssh-key-v1：magic(15 字节) + string ciphername；未加密时为 "none"
+    const head = atob(m[1]!.replace(/\s+/g, '').slice(0, 64));
+    const len = head.charCodeAt(18);
+    return head.slice(19, 19 + len) !== 'none';
+  } catch {
+    return false;
+  }
+}
+
+/** 私钥带口令保护时，口令必填 */
+const passphraseRules = [({ getFieldValue }: { getFieldValue: (name: string) => unknown }) => ({
+  validator: async (_: unknown, value: string | undefined) => {
+    if (isEncryptedKey(getFieldValue('privateKey') as string | undefined) && !value) throw new Error('这把私钥有口令保护，请填写口令');
+  },
+})];
+
 /** 私钥输入：可直接粘贴，也可把密钥文件拖进来或点按钮选择。文件只在浏览器内读取成文本，不会单独上传。 */
 function PrivateKeyInput({ value, onChange, onFileName }: { value?: string; onChange?: (v: string) => void; onFileName?: (name: string) => void }) {
   const [dragging, setDragging] = useState(false);
@@ -57,6 +80,9 @@ function PrivateKeyInput({ value, onChange, onFileName }: { value?: string; onCh
         <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(42,120,214,0.08)', borderRadius: 6, pointerEvents: 'none', color: '#2a78d6', fontWeight: 500 }}>
           松开以读取私钥文件
         </div>
+      )}
+      {isEncryptedKey(value) && (
+        <Alert type="warning" showIcon style={{ marginTop: 8 }} title="这把私钥有口令保护：请在下方“私钥口令”中填写口令，否则无法解析。平台采集是无人值守的，建议为采集单独生成一把不带口令的专用密钥。" />
       )}
       <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
         <Button size="small" icon={<FolderOpenOutlined />} onClick={() => picker.current?.click()}>选择文件</Button>
@@ -100,7 +126,7 @@ function CredentialModal({ mode, onClose, onSaved }: { mode: { kind: 'create' } 
         <Form.Item name="privateKey" label="SSH 私钥（OpenSSH / PEM 格式）" rules={[{ required: true, min: 50, message: '请粘贴完整的私钥，或拖入私钥文件' }]}>
           <PrivateKeyInput onFileName={(name) => { if (mode?.kind === 'create' && !form.getFieldValue('name')) form.setFieldValue('name', name); }} />
         </Form.Item>
-        <Form.Item name="passphrase" label="私钥口令（如有）"><Input.Password autoComplete="new-password" /></Form.Item>
+        <Form.Item name="passphrase" label="私钥口令（如有）" dependencies={['privateKey']} rules={passphraseRules}><Input.Password autoComplete="new-password" /></Form.Item>
       </Form>
     </Modal>
   );
@@ -222,7 +248,7 @@ function ServerModal({ editing, credentials, onClose, onSaved, onCredentialCreat
               <PrivateKeyInput />
             </Form.Item>
             <Space size={16} align="start" style={{ display: 'flex' }}>
-              <Form.Item name="passphrase" label="私钥口令（如有）" style={{ width: 280 }}><Input.Password autoComplete="new-password" /></Form.Item>
+              <Form.Item name="passphrase" label="私钥口令（如有）" dependencies={['privateKey']} rules={passphraseRules} style={{ width: 280 }}><Input.Password autoComplete="new-password" /></Form.Item>
               <Form.Item name="credentialName" label="凭据名称（可选）" style={{ width: 280 }}><Input maxLength={100} placeholder="默认：服务器名称 + “密钥”" /></Form.Item>
             </Space>
           </>
