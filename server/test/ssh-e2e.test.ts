@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ssh2 from 'ssh2';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -121,25 +121,37 @@ describe('自动安装采集组件', () => {
   let shellServer: ssh2.Server;
   let shellTarget: SshTarget;
   let home: string;
+  let fakePkg: string;
+  const installDir = () => join(home, '.local', 'share', 'usage-monitor');
+
+  /** 假 ccusage：version 与是否支持 `claude daily --breakdown` 可控 */
+  function writeFakeCcusage(file: string, version: string, modern = true): void {
+    const sample = JSON.stringify(report({ '2026-09-19': [{ model: 'claude-opus-5', input: 10, cost: 0.01 }] }));
+    writeFileSync(file, `#!/usr/bin/env node
+const a = process.argv.slice(2);
+if (a[0] === '--version') console.log('ccusage ${version}');
+else if (a.includes('--help')) console.log(${modern} && a[0] === 'claude' ? 'OPTIONS: -b, --breakdown' : 'unknown command');
+else console.log(${JSON.stringify(sample)});
+`);
+    chmodSync(file, 0o755);
+  }
 
   beforeAll(async () => {
     home = mkdtempSync(join(tmpdir(), 'usage-monitor-home-'));
     mkdirSync(join(home, '.claude', 'projects', 'demo'), { recursive: true });
     writeFileSync(join(home, '.claude', 'projects', 'demo', 's.jsonl'), '{}\n');
     // 本地假 ccusage 包：安装过程不依赖外网
-    const pkg = join(home, 'fake-ccusage');
-    mkdirSync(pkg);
-    writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: 'ccusage', version: '20.0.23', bin: { ccusage: 'cli.js' } }));
-    const sample = JSON.stringify(report({ '2026-09-19': [{ model: 'claude-opus-5', input: 10, cost: 0.01 }] }));
-    writeFileSync(join(pkg, 'cli.js'), `#!/usr/bin/env node\nconsole.log(process.argv[2] === '--version' ? 'ccusage 20.0.23' : ${JSON.stringify(sample)});\n`);
-    chmodSync(join(pkg, 'cli.js'), 0o755);
+    fakePkg = join(home, 'fake-ccusage');
+    mkdirSync(fakePkg);
+    writeFileSync(join(fakePkg, 'package.json'), JSON.stringify({ name: 'ccusage', version: '20.0.23', bin: { ccusage: 'cli.js' } }));
+    writeFakeCcusage(join(fakePkg, 'cli.js'), '20.0.23');
 
-    // 一个有普通 shell 权限的账户：按客户端给的命令执行（含 `sh -s` + 标准输入）
+    // 一个有普通 shell 权限的账户：按客户端给的命令执行（含 `sh -s` + 标准输入）。PATH 里没有 ccusage。
     shellServer = new ssh2.Server({ hostKeys: [hostKey.private] }, (client) => {
       client.on('authentication', (ctx) => (ctx.method === 'publickey' && ctx.key.data.equals(clientPublic.getPublicSSH()) ? ctx.accept() : ctx.reject(['publickey'])));
       client.on('ready', () => client.on('session', (accept) => accept().on('exec', (acceptExec, _r, info) => {
         const stream = acceptExec();
-        const child = spawn('sh', ['-c', info.command], { env: { PATH: process.env.PATH, HOME: home } });
+        const child = spawn('sh', ['-c', info.command], { env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: home } });
         stream.pipe(child.stdin);
         child.stdout.on('data', (c) => stream.write(c));
         child.stderr.on('data', (c) => stream.stderr.write(c));
@@ -156,20 +168,51 @@ describe('自动安装采集组件', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it('经 SSH 安装后，用登记的采集命令即可采集', async () => {
-    const result = await installCollector(sshExecutor, shellTarget, { ccusageSpec: process.env.E2E_REAL_CCUSAGE ? undefined : join(home, 'fake-ccusage'), timeoutMs: 300_000 });
-    if (process.env.E2E_REAL_CCUSAGE) { console.log('REAL INSTALL', result.nodeVersion, result.ccusageVersion, result.log.split('\n').slice(-3).join(' / ')); return; }
-    expect(result).toMatchObject({ collectCommand: `${home}/.local/share/usage-monitor/ccusage-collect`, ccusageVersion: '20.0.23', defaultDataDir: `${home}/.claude` });
-
+  async function collectWith(collectCommand: string) {
     const req = request(join(home, '.claude'));
-    const out = await sshExecutor.exec(shellTarget, buildCollectCommand(result.collectCommand, req), 20_000);
-    const envelope = parseEnvelope(out.stdout, req);
-    expect(envelope).toMatchObject({ collectorVersion: '1.1.0', ccusageVersion: '20.0.23' });
-    expect(claudeCodeAdapter.parse(envelope.report)[0]).toMatchObject({ model: 'claude-opus-5', totalTokens: 10 });
+    const out = await sshExecutor.exec(shellTarget, buildCollectCommand(collectCommand, req), 60_000);
+    return parseEnvelope(out.stdout, req);
+  }
 
-    // 重复安装（升级）是幂等的
-    expect((await installCollector(sshExecutor, shellTarget, { ccusageSpec: join(home, 'fake-ccusage'), timeoutMs: 120_000 })).collectCommand).toBe(result.collectCommand);
-  }, 180_000);
+  it('远端没有 ccusage 时安装固定版本并锁定版本号；重复安装幂等', async () => {
+    const result = await installCollector(sshExecutor, shellTarget, { ccusageSpec: fakePkg, timeoutMs: 120_000 });
+    expect(result).toMatchObject({ collectCommand: `${installDir()}/ccusage-collect`, ccusageMode: 'installed', ccusageVersion: '20.0.23', versionMismatch: false, defaultDataDir: `${home}/.claude` });
+    expect(JSON.parse(readFileSync(join(installDir(), 'config.json'), 'utf8')).expectedCcusageVersion).toBe('20.0.23');
+
+    const envelope = await collectWith(result.collectCommand);
+    expect(envelope).toMatchObject({ collectorVersion: '1.2.0', ccusageVersion: '20.0.23' });
+    expect(claudeCodeAdapter.parse(envelope.report)[0]).toMatchObject({ model: 'claude-opus-5', totalTokens: 10 });
+    expect((await installCollector(sshExecutor, shellTarget, { mode: 'pinned', ccusageSpec: fakePkg, timeoutMs: 120_000 })).collectCommand).toBe(result.collectCommand);
+  }, 240_000);
+
+  it('远端已装过 ccusage 时直接复用、不重新安装，也不锁版本（用户自行升级后照常采集）', async () => {
+    rmSync(installDir(), { recursive: true, force: true });
+    mkdirSync(join(home, '.npm-global', 'bin'), { recursive: true });
+    const existing = join(home, '.npm-global', 'bin', 'ccusage');
+    writeFakeCcusage(existing, '20.1.0');
+
+    const result = await installCollector(sshExecutor, shellTarget, { ccusageSpec: '/nonexistent/should-not-be-installed', timeoutMs: 120_000 });
+    expect(result).toMatchObject({ ccusageMode: 'reused', ccusagePath: existing, ccusageVersion: '20.1.0', versionMismatch: true });
+    expect(existsSync(join(installDir(), 'node_modules'))).toBe(false);
+    expect(JSON.parse(readFileSync(join(installDir(), 'config.json'), 'utf8'))).toMatchObject({ ccusageBin: existing, expectedCcusageVersion: null });
+
+    writeFakeCcusage(existing, '20.2.0'); // 用户自己升级了 ccusage
+    expect((await collectWith(result.collectCommand)).ccusageVersion).toBe('20.2.0');
+  }, 120_000);
+
+  it('已装的 ccusage 过旧（没有 claude daily --breakdown）时不擅自覆盖，明确报告不兼容', async () => {
+    writeFakeCcusage(join(home, '.npm-global', 'bin', 'ccusage'), '15.3.1', false);
+    await expect(installCollector(sshExecutor, shellTarget, { timeoutMs: 120_000 })).rejects.toMatchObject({ code: 'CCUSAGE_INCOMPATIBLE', message: expect.stringContaining('15.3.1') });
+  }, 120_000);
+
+  it('“始终最新”模式经 npx --yes 运行，每次采集自动确认更新', async () => {
+    const result = await installCollector(sshExecutor, shellTarget, { mode: 'latest', latestSpec: fakePkg, timeoutMs: 180_000 });
+    expect(result).toMatchObject({ ccusageMode: 'latest', ccusageVersion: '20.0.23' });
+    const config = JSON.parse(readFileSync(join(installDir(), 'config.json'), 'utf8'));
+    expect(config.ccusageCommand.slice(1)).toEqual(['--yes', fakePkg]);
+    expect(config.expectedCcusageVersion).toBeNull();
+    expect((await collectWith(result.collectCommand)).ccusageVersion).toBe('20.0.23');
+  }, 240_000);
 
   it('密钥被 forced command 限制时给出明确说明，而不是笼统的失败', async () => {
     await expect(installCollector(sshExecutor, target, { timeoutMs: 30_000 })).rejects.toMatchObject({ code: 'KEY_RESTRICTED' });

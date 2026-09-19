@@ -11,12 +11,14 @@
 //   { "allowedDirs": ["/home/zhangsan/.claude", "/home/*/.claude"],
 //     "ccusageBin": "/usr/local/bin/ccusage", "expectedCcusageVersion": "20.0.23",
 //     "costMode": "auto", "offline": true, "timeoutSeconds": 100 }
+//   可用 "ccusageCommand": ["/path/npx", "--yes", "ccusage@latest"] 代替 ccusageBin：每次采集自动确认并使用最新版；
+//   此时不要设置 expectedCcusageVersion。
 
 import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-const COLLECTOR_VERSION = '1.1.0';
+const COLLECTOR_VERSION = '1.2.0';
 const CONFIG_PATH = process.env.CCUSAGE_COLLECT_CONFIG || '/etc/ccusage-collect/config.json';
 const SAFE_PATH = /^\/[A-Za-z0-9._@+\-/]*$/;
 const SOURCES = { 'claude-code': { subcommand: 'claude', dirEnv: 'CLAUDE_CONFIG_DIR', logRoot: 'projects' } };
@@ -120,11 +122,15 @@ async function main() {
     fail('DIR_UNREADABLE', '采集账户没有数据目录的读取权限');
   }
 
-  const bin = config.ccusageBin || 'ccusage';
-  const childEnv = { PATH: process.env.PATH, HOME: process.env.HOME, NO_COLOR: '1', [source.dirEnv]: realDir };
+  // ccusageCommand 形如 ["npx", "--yes", "ccusage@latest"]：首个元素是可执行文件，其余是固定前缀参数
+  const command = Array.isArray(config.ccusageCommand) && config.ccusageCommand.every((c) => typeof c === 'string') && config.ccusageCommand.length > 0
+    ? config.ccusageCommand : [config.ccusageBin || 'ccusage'];
+  const [bin, ...prefix] = command;
+  const childEnv = { PATH: process.env.PATH, HOME: process.env.HOME, NO_COLOR: '1', npm_config_yes: 'true', npm_config_update_notifier: 'false', [source.dirEnv]: realDir };
 
-  const version = await run(bin, ['--version'], childEnv, 20000);
-  if (version.error) fail('CCUSAGE_MISSING', '未找到 ccusage，请预装固定版本');
+  // 经 npx 运行时首次调用可能要下载新版本，给足时间
+  const version = await run(bin, [...prefix, '--version'], childEnv, prefix.length ? 180000 : 20000);
+  if (version.error) fail('CCUSAGE_MISSING', prefix.length ? '无法通过 npx 获取 ccusage（需要能访问 npm 源）' : '未找到 ccusage，请预装固定版本');
   const ccusageVersion = (/(\d+\.\d+\.\d+\S*)/.exec(version.stdout) ?? [])[1] ?? 'unknown';
   if (config.expectedCcusageVersion && ccusageVersion !== config.expectedCcusageVersion) {
     fail('CCUSAGE_VERSION_MISMATCH', `ccusage 版本为 ${ccusageVersion}，要求 ${config.expectedCcusageVersion}`);
@@ -143,7 +149,7 @@ async function main() {
     '--since', echo.since.replaceAll('-', ''), '--until', echo.until.replaceAll('-', ''),
     '--timezone', args.timezone, '--mode', costMode, offline ? '--offline' : '--no-offline',
   ];
-  const result = await run(bin, ccArgs, childEnv, (config.timeoutSeconds ?? 100) * 1000);
+  const result = await run(bin, [...prefix, ...ccArgs], childEnv, (config.timeoutSeconds ?? 100) * 1000);
   if (result.error) {
     if (result.error.killed) fail('CCUSAGE_TIMEOUT', 'ccusage 执行超时');
     fail('CCUSAGE_FAILED', `ccusage 执行失败: ${String(result.stderr).slice(0, 300)}`);

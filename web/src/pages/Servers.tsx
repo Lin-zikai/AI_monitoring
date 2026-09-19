@@ -16,7 +16,34 @@ const { Text, Paragraph } = Typography;
 
 // ---------------------------------------------------------------- 凭据
 
-const INSTALL_NOTE = '平台会用这台服务器的 SSH 账户登录，在其家目录的 ~/.local/share/usage-monitor/ 下安装：Node.js（远端没有 20+ 版本时自动下载并校验）、固定版本的 ccusage 和采集脚本。不需要 root，不改动系统目录；要求该密钥在远端有普通 shell 权限，且远端能访问外网。';
+type InstallMode = 'auto' | 'latest' | 'pinned';
+
+const INSTALL_MODES: Array<{ value: InstallMode; label: string; note: string }> = [
+  { value: 'auto', label: '自动（推荐）', note: '远端已经装过 ccusage 就直接复用，不重新安装；没有才装一份。不锁定版本号，你自己升级 ccusage 后采集照常进行。' },
+  { value: 'latest', label: '始终使用最新版', note: '每次采集都通过 npx --yes ccusage@latest 运行：有新版本时自动确认更新，再取数。每次采集都需要远端能访问 npm 源；新版若改了输出格式，平台会校验失败并保留旧数据。' },
+  { value: 'pinned', label: '固定版本', note: '在平台专用目录里装一份固定版本（与平台核对过输出格式的版本），不影响远端已有的 ccusage。多台服务器费用口径最一致。' },
+];
+
+/** 安装对话框的内容：说明 + 模式选择。选择结果写回 choice.mode。 */
+function InstallOptions({ choice, lead }: { choice: { mode: InstallMode }; lead?: string }) {
+  const [mode, setMode] = useState<InstallMode>(choice.mode);
+  return (
+    <div>
+      {lead && <Paragraph type="warning">{lead}</Paragraph>}
+      <Paragraph>平台会用这台服务器的 SSH 账户登录，只在其家目录的 <Text code>~/.local/share/usage-monitor/</Text> 下放置采集脚本与配置。不需要 root，不改动系统目录；远端已有的 Node.js 与 ccusage 会直接复用，缺少时才下载。要求该密钥在远端有普通 shell 权限。</Paragraph>
+      <Radio.Group value={mode} onChange={(e) => { choice.mode = e.target.value; setMode(e.target.value); }} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {INSTALL_MODES.map((m) => (
+          <Radio key={m.value} value={m.value}>
+            <div><Text strong>{m.label}</Text></div>
+            <Text type="secondary" style={{ fontSize: 12 }}>{m.note}</Text>
+          </Radio>
+        ))}
+      </Radio.Group>
+    </div>
+  );
+}
+
+const CCUSAGE_MODE_TEXT: Record<string, string> = { reused: '复用远端已安装的 ccusage', installed: '已安装平台专用的固定版本', latest: '每次采集经 npx --yes 自动更新到最新版' };
 
 const MAX_KEY_FILE_BYTES = 20_000;
 
@@ -544,35 +571,42 @@ export function ServersPage() {
       const r = await api.post<{ ok: boolean; stage?: 'ssh' | 'collector'; message?: string; code?: string; collectorVersion?: string | null }>(`/servers/${s.id}/test`);
       if (r.ok) message.success(`连接成功，采集脚本版本 ${r.collectorVersion ?? '未知'}`);
       else if (r.stage === 'collector') {
-        // SSH 本身没问题，只是远端还没装采集组件：直接给出自动安装入口
-        modal.confirm({ title: '已连接，但远端还没有采集组件', okText: '自动安装', cancelText: '稍后', content: INSTALL_NOTE, onOk: () => { void installCollector(s); } });
+        // SSH 本身没问题，只是远端还没有采集脚本：直接给出自动安装入口
+        askInstall(s, '已连接，但远端还没有采集脚本');
       } else modal.error({ title: '连接测试未通过', content: `${r.code ? `${r.code}：` : ''}${r.message ?? ''}` });
       servers.reload();
     } catch (err) { message.error(errorMessage(err)); } finally { setTesting(null); }
   };
 
-  const installCollector = async (s: Server) => {
-    const progress = modal.info({ title: `正在 ${s.name} 上安装采集组件…`, content: '通过 SSH 下载并安装，通常需要 10 秒到几分钟，请不要关闭页面。', okButtonProps: { loading: true, disabled: true }, okText: '安装中', keyboard: false, maskClosable: false });
+  const installCollector = async (s: Server, mode: InstallMode) => {
+    const progress = modal.info({ title: `正在 ${s.name} 上配置采集组件…`, content: '通过 SSH 执行，通常需要几秒到几分钟，请不要关闭页面。', okButtonProps: { loading: true, disabled: true }, okText: '进行中', keyboard: false, maskClosable: false });
     try {
-      const r = await api.post<{ ok: boolean; code?: string; message?: string; collectCommand?: string; nodeVersion?: string; ccusageVersion?: string; defaultDataDir?: string }>(`/servers/${s.id}/install-collector`);
+      const r = await api.post<{ ok: boolean; code?: string; message?: string; collectCommand?: string; nodeVersion?: string; ccusageVersion?: string; defaultDataDir?: string; ccusageMode?: string; ccusagePath?: string; versionMismatch?: boolean }>(`/servers/${s.id}/install-collector`, { mode });
       progress.destroy();
       if (r.ok) {
         modal.success({
-          title: '采集组件安装完成',
+          title: '采集组件已就绪', width: 600,
           content: (
             <div>
-              <Paragraph>ccusage {r.ccusageVersion}，Node {r.nodeVersion}。采集命令已自动登记为：</Paragraph>
-              <Paragraph><Text code>{r.collectCommand}</Text></Paragraph>
+              <Paragraph>{CCUSAGE_MODE_TEXT[r.ccusageMode ?? ''] ?? ''}：ccusage {r.ccusageVersion}{r.ccusageMode === 'reused' ? <>（<Text code>{r.ccusagePath}</Text>）</> : null}，Node {r.nodeVersion}。</Paragraph>
+              {r.versionMismatch && <Paragraph type="warning">该版本与平台核对过输出格式的版本不同：可以正常采集，但估算费用的口径可能与其他服务器略有差异（每行统计都会记录当时的版本）。</Paragraph>}
+              <Paragraph>采集命令已自动登记为 <Text code>{r.collectCommand}</Text></Paragraph>
               <Paragraph style={{ marginBottom: 0 }}>下一步：展开该服务器“添加采集目标”。该账户自己的数据目录一般是 <Text code copyable>{r.defaultDataDir}</Text></Paragraph>
             </div>
           ),
         });
-      } else modal.error({ title: '自动安装未成功', width: 640, content: <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12, margin: 0 }}>{`${r.code ? `${r.code}：` : ''}${r.message ?? ''}`}</pre> });
+      } else if (r.code === 'CCUSAGE_INCOMPATIBLE') {
+        // 远端已装的 ccusage 太旧：不擅自覆盖，让管理员改选其他模式（都不会动远端原有的那份）
+        askInstall(s, '未做任何改动', `${r.message ?? '远端已安装的 ccusage 版本不兼容'}。可以改用下面两种模式之一，它们都不会改动远端原有的 ccusage。`, 'latest');
+      } else modal.error({ title: '未成功', width: 640, content: <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12, margin: 0 }}>{`${r.code ? `${r.code}：` : ''}${r.message ?? ''}`}</pre> });
       servers.reload();
     } catch (err) { progress.destroy(); message.error(errorMessage(err)); }
   };
 
-  const confirmInstall = (s: Server) => modal.confirm({ title: `在“${s.name}”上安装 / 更新采集组件？`, okText: '开始安装', content: INSTALL_NOTE, onOk: () => { void installCollector(s); } });
+  const askInstall = (s: Server, title: string, lead?: string, initial: InstallMode = 'auto') => {
+    const choice = { mode: initial };
+    modal.confirm({ title, width: 600, okText: '开始', cancelText: '稍后', content: <InstallOptions choice={choice} lead={lead} />, onOk: () => { void installCollector(s, choice.mode); } });
+  };
 
   const testTarget = async (t: Target) => {
     setTesting(t.id);
@@ -672,7 +706,7 @@ export function ServersPage() {
               <Dropdown menu={{
                 items: [
                   { key: 'hostkey', label: '主机指纹', onClick: () => setHostKeyFor(s) },
-                  { key: 'install', label: '安装 / 更新采集组件', disabled: !s.hostKeyFingerprint, onClick: () => confirmInstall(s) },
+                  { key: 'install', label: '安装 / 更新采集组件', disabled: !s.hostKeyFingerprint, onClick: () => askInstall(s, `在“${s.name}”上安装 / 更新采集组件`) },
                   { key: 'toggle', label: s.enabled ? '停用' : '启用', onClick: () => void toggle('servers', s.id, !s.enabled) },
                   { type: 'divider' },
                   { key: 'delete', danger: true, label: '删除', onClick: () => remove('servers', s.id, s.name) },
