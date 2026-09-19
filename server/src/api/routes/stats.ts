@@ -1,5 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { Logger } from 'pino';
 import { z } from 'zod';
+import { latestAccountLimits, refreshAccountLimits } from '../../collect/limits.js';
 import { SOURCE_INFO, supportedSources } from '../../collect/adapter.js';
 import { getGeneralSettings, type GeneralSettings } from '../../settings.js';
 import { addDays, dateInTz, diffDays, monthKey, monthRange, nextSlot } from '../../util/time.js';
@@ -88,6 +90,14 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
     if (date > today) throw new HttpError(400, '不能选择未来的日期');
     const first = (await db.query('SELECT min(usage_date)::text AS d FROM usage_daily')).rows[0].d as string | null;
     return { date, today, earliest: first ?? today, rows: (await dailyRanking(date)).rows };
+  });
+
+  // ---- 账号额度（5 小时 / 周）：目前所有用户与服务器共用同一个账号，按数据源各展示一份 ----
+  app.get('/limits', { preHandler: ctx.requireAdmin }, async () => ({ limits: await latestAccountLimits(db) }));
+
+  app.post('/limits/refresh', { preHandler: ctx.requireAdmin, config: { rateLimit: { max: 6, timeWindow: '1 minute' } } }, async (req) => {
+    const outcomes = await refreshAccountLimits({ db, executor: ctx.executor, masterKey: ctx.config.masterKey, log: req.log as unknown as Logger });
+    return { outcomes, limits: await latestAccountLimits(db) };
   });
 
   app.get('/meta', auth, async (req) => {

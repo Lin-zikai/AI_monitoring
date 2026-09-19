@@ -64,6 +64,8 @@ export function createQueues(redisUrl: string, collectMaxAttempts: number): Queu
       const s = await getGeneralSettings(db);
       const pattern = s.collectIntervalHours === 24 ? '0 0 * * *' : `0 */${s.collectIntervalHours} * * *`;
       await schedule.upsertJobScheduler('collect-tick', { pattern, tz: s.timezone }, { name: 'tick', opts: { removeOnComplete: 50, removeOnFail: 100 } });
+      // 账号额度（5 小时 / 周）变化快：独立于 2 小时的用量采集，每 10 分钟查一次
+      await schedule.upsertJobScheduler('limits-tick', { every: 10 * 60_000 }, { name: 'limits', opts: { removeOnComplete: 20, removeOnFail: 50 } });
       await mail.upsertJobScheduler('mail-sweep', { every: 60_000 }, { name: 'drain', opts: { removeOnComplete: true, removeOnFail: 100 } });
     },
 

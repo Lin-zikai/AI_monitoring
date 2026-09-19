@@ -3,6 +3,7 @@ import dayjs from 'dayjs';
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
+import { AccountLimitsCard } from '../components/AccountLimits';
 import { RankBarChart, StackedTrendChart, type ChartMetric } from '../components/charts';
 import { BudgetBar, CostCell, PageTitle, StatCard, TokenCell } from '../components/common';
 import { fmtCost, fmtFull, fmtTime, fmtTokens, num } from '../format';
@@ -67,6 +68,8 @@ export function DashboardPage() {
         )}
       />
       {error && <Alert type="error" showIcon title={error} style={{ marginBottom: 16 }} />}
+
+      <AccountLimitsCard />
 
       <Row gutter={[16, 16]}>
         <Col xs={12} lg={6}><StatCard loading={first} label="今日 Token" value={fmtTokens(t?.todayTokens)} full={`${fmtFull(t?.todayTokens)} Token`} hint={`今日活跃用户 ${t?.activeUsersToday ?? 0} 人`} /></Col>

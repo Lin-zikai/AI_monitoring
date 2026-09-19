@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { latestAccountLimits, refreshAccountLimits } from '../src/collect/limits.js';
 import { runCollection } from '../src/collect/runner.js';
 import { createAdhocBatch, ensureSlotBatch } from '../src/collect/scheduler.js';
 import type { Db } from '../src/db/pool.js';
@@ -21,7 +22,7 @@ beforeAll(async () => {
 afterAll(() => drop());
 
 beforeEach(async () => {
-  await db.query('TRUNCATE users, credentials, servers, collection_batches, alert_rules, alert_events, email_outbox, settings CASCADE');
+  await db.query('TRUNCATE users, credentials, servers, collection_batches, alert_rules, alert_events, email_outbox, settings, account_limit_snapshots CASCADE');
   ({ credentialId } = await seedBase(db));
   zhangsan = await addUser(db, 'zhangsan', { budget: 500 });
   serverA = await addServer(db, 'server-a', credentialId);
@@ -350,6 +351,43 @@ describe('邮件告警', () => {
     await collect(db, offline, targetA, at('2026-09-19 18:00'));
     await collect(db, offline, targetA, at('2026-09-19 20:00'));
     expect(await outbox(db)).toHaveLength(2);
+  });
+});
+
+describe('账号额度', () => {
+  const limitsReply = (body: object) => ({ stdout: JSON.stringify({ schema: 1, collectorVersion: '1.5.0', ...body }), stderr: '', exitCode: 0 });
+
+  it('某台服务器令牌过期时换下一台；只保存百分比与刷新时间；失败晚于成功时给出提示', async () => {
+    const usage = fakeExecutor(() => report({ '2026-09-19': [opus(1000, 1)] }));
+    await collect(db, usage, targetA, NOW);
+    await collect(db, usage, targetB, NOW);
+    const asked: string[] = [];
+    const executor = { exec: async (t: { host: string }, command: string) => {
+      asked.push(`${t.host} ${command}`);
+      if (command.includes('--limits codex')) return limitsReply({ status: 'error', code: 'NO_LOGIN', message: '没有登录信息' });
+      return t.host === 'server-a.internal'
+        ? limitsReply({ status: 'error', code: 'TOKEN_EXPIRED', message: '登录令牌已过期' })
+        : limitsReply({ status: 'ok', plan: 'max', windows: [
+          { key: 'five_hour', label: '5 小时', windowMinutes: 300, usedPercent: 37.5, resetsAt: '2026-09-19T21:30:00.000Z' },
+          { key: 'seven_day', label: '每周', windowMinutes: 10080, usedPercent: 46, resetsAt: '2026-09-22T10:00:00.000Z' }] });
+    } };
+    const deps = { db, executor, masterKey: (await import('./helpers.js')).masterKey, log: silentLog };
+
+    const outcomes = await refreshAccountLimits(deps);
+    expect(outcomes.find((o) => o.provider === 'claude-code')).toMatchObject({ ok: true, serverName: 'server-b' });
+    expect(asked.filter((a) => a.includes('claude-code'))).toEqual([
+      'server-a.internal ccusage-collect --limits claude-code --dir /home/zhangsan/.claude',
+      'server-b.internal ccusage-collect --limits claude-code --dir /home/developer/.claude',
+    ]);
+
+    const view = await latestAccountLimits(db);
+    expect(view.find((v) => v.provider === 'claude-code')).toMatchObject({
+      plan: 'max', serverName: 'server-b', lastError: null,
+      windows: [{ key: 'five_hour', usedPercent: 37.5, resetsAt: '2026-09-19T21:30:00.000Z' }, { key: 'seven_day', usedPercent: 46 }],
+    });
+    // Codex 没有任何采集成功的目标 → 明确说明，而不是空白
+    expect(view.find((v) => v.provider === 'codex')).toMatchObject({ windows: [], fetchedAt: null, lastError: { code: 'NO_SOURCE' } });
+    expect(JSON.stringify((await db.query('SELECT * FROM account_limit_snapshots')).rows)).not.toMatch(/token|Bearer|test-key/i);
   });
 });
 

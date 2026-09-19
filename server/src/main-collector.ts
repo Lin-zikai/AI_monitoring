@@ -1,4 +1,5 @@
 import { UnrecoverableError, Worker } from 'bullmq';
+import { refreshAccountLimits } from './collect/limits.js';
 import { runCollection } from './collect/runner.js';
 import { applyRetention, ensureSlotBatch, findOrphanedRuns } from './collect/scheduler.js';
 import { loadConfig } from './config.js';
@@ -25,7 +26,8 @@ async function tick(): Promise<void> {
   await queues.enqueueRuns(await findOrphanedRuns(db));
 }
 
-const scheduleWorker = new Worker(SCHEDULE_QUEUE, tick, { connection });
+const limitsDeps = { db, executor: sshExecutor, masterKey: config.masterKey, log };
+const scheduleWorker = new Worker(SCHEDULE_QUEUE, async (job) => (job.name === 'limits' ? refreshAccountLimits(limitsDeps) : tick()), { connection });
 
 const collectWorker = new Worker<CollectJob>(COLLECT_QUEUE, async (job) => {
   const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
@@ -47,6 +49,7 @@ for (const w of [scheduleWorker, collectWorker]) w.on('error', (err) => log.erro
 await queues.syncSchedule(db);
 // 启动即检查：若当前调度时点的批次因停机被遗漏，则补建一次
 await tick().catch((err) => log.error({ err }, '启动补采检查失败'));
+void refreshAccountLimits(limitsDeps).catch((err) => log.error({ err }, '账号额度查询失败'));
 log.info({ concurrency: config.collectConcurrency }, '采集 Worker 已启动');
 
 async function shutdown(): Promise<void> {

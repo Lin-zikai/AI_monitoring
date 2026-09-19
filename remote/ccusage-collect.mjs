@@ -11,6 +11,10 @@
 //   { "allowedDirs": ["/home/zhangsan/.claude", "/home/*/.claude"],
 //     "ccusageBin": "/usr/local/bin/ccusage", "expectedCcusageVersion": "20.0.23",
 //     "costMode": "auto", "offline": true, "timeoutSeconds": 100 }
+// 账号额度查询：ccusage-collect --limits claude-code --dir /home/u/.claude
+//   读取该目录下 CLI 自己保存的登录令牌，向服务商查询 5 小时 / 周额度的已用比例与刷新时间。
+//   只读：不刷新令牌（刷新会让正在使用的 CLI 掉线）；令牌只在本机使用，输出里只有百分比与时间。
+//
 //   可用 "ccusageCommand": ["/path/npx", "--yes", "ccusage@latest"] 代替 ccusageBin：每次采集自动确认并使用最新版；
 //   此时不要设置 expectedCcusageVersion。
 
@@ -18,7 +22,7 @@ import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-const COLLECTOR_VERSION = '1.4.0';
+const COLLECTOR_VERSION = '1.5.0';
 const CONFIG_PATH = process.env.CCUSAGE_COLLECT_CONFIG || '/etc/ccusage-collect/config.json';
 const SAFE_PATH = /^\/[A-Za-z0-9._@+\-/]*$/;
 // requireLogRoot：Claude 没有 projects/ 时 ccusage 会报错，视为“确实没有用量”；Codex 的记录位置随版本变化（sessions/ 或 sqlite），交给 ccusage 判断
@@ -47,7 +51,7 @@ function parseArgs() {
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i];
     const value = argv[i + 1];
-    if (!/^--(source|dir|since|until|timezone)$/.test(key ?? '') || value === undefined) fail('BAD_ARGS', '不支持的参数');
+    if (!/^--(source|dir|since|until|timezone|limits)$/.test(key ?? '') || value === undefined) fail('BAD_ARGS', '不支持的参数');
     args[key.slice(2)] = value;
   }
   return args;
@@ -88,8 +92,101 @@ function run(bin, args, env, timeoutMs) {
   });
 }
 
+// ---------------------------------------------------------------- 账号额度
+
+/** 非交互 SSH 会话通常没有代理变量：依次从当前环境、登录 shell、Claude 的 settings.json 里找 */
+async function proxyEnv(realDir) {
+  const pick = (env) => Object.fromEntries(Object.entries(env).filter(([k, v]) => /^(https?|all|no)_proxy$/i.test(k) && v));
+  const usable = (env) => Object.keys(env).some((k) => /^(https?|all)_proxy$/i.test(k)); // 只有 no_proxy 不算配置了代理
+  let found = pick(process.env);
+  if (!usable(found)) {
+    const login = await run('bash', ['-lc', 'env'], { PATH: process.env.PATH, HOME: process.env.HOME }, 8000);
+    if (!login.error) found = pick(Object.fromEntries(String(login.stdout).split('\n').map((l) => { const i = l.indexOf('='); return [l.slice(0, i), l.slice(i + 1)]; })));
+  }
+  if (!usable(found)) {
+    try { found = pick(JSON.parse(readFileSync(join(realDir, 'settings.json'), 'utf8')).env ?? {}); } catch { /* 没有该文件或没有 env 段 */ }
+  }
+  return found;
+}
+
+/** 令牌经标准输入交给 curl（不出现在进程命令行里）；curl 会遵循代理环境变量 */
+function httpGetJson(url, headers, env) {
+  const cfg = [`url = "${url}"`, 'silent', 'max-time = 25', 'write-out = "\\n%{http_code}"', ...headers.map((h) => `header = "${h.replace(/["\\\r\n]/g, '')}"`)].join('\n');
+  return new Promise((resolve) => {
+    const child = execFile('curl', ['--config', '-'], { env, timeout: 30000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
+      if (error) return resolve({ status: 0, error: error.killed ? '请求超时' : `curl 失败（${error.code ?? '未知'}）` });
+      const out = String(stdout); const i = out.lastIndexOf('\n');
+      let json; try { json = JSON.parse(out.slice(0, i)); } catch { /* 非 JSON */ }
+      resolve({ status: Number(out.slice(i + 1)), json });
+    });
+    child.stdin.end(cfg);
+  });
+}
+
+const toIso = (v) => {
+  if (v === null || v === undefined || v === '') return null;
+  const d = typeof v === 'number' ? new Date(v < 1e12 ? v * 1000 : v) : new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+};
+const pct = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v * 10) / 10)) : null);
+
+const LIMIT_PROVIDERS = {
+  'claude-code': {
+    async query(realDir, env) {
+      let cred;
+      try { cred = JSON.parse(readFileSync(join(realDir, '.credentials.json'), 'utf8')).claudeAiOauth; } catch { fail('NO_LOGIN', '该目录下没有 Claude Code 的订阅登录信息（.credentials.json）'); }
+      if (!cred?.accessToken) fail('NO_LOGIN', 'Claude Code 不是订阅登录（可能用的是 API Key），没有 5 小时 / 周额度');
+      if (cred.expiresAt && cred.expiresAt < Date.now()) fail('TOKEN_EXPIRED', '登录令牌已过期：等该账户下次使用 Claude Code 时会自动续期（平台不会替它续期）');
+      const r = await httpGetJson('https://api.anthropic.com/api/oauth/usage', [`Authorization: Bearer ${cred.accessToken}`, 'anthropic-beta: oauth-2025-04-20', 'User-Agent: claude-cli/2.0.0 (external, cli)'], env);
+      if (r.status !== 200 || !r.json) fail(r.status === 401 ? 'TOKEN_EXPIRED' : 'LIMITS_UNAVAILABLE', r.error ?? `服务商返回 ${r.status}${r.json?.error?.message ? `：${String(r.json.error.message).slice(0, 120)}` : ''}`);
+      const w = (key, label, minutes) => (r.json[key] ? { key, label, windowMinutes: minutes, usedPercent: pct(r.json[key].utilization), resetsAt: toIso(r.json[key].resets_at) } : null);
+      return { plan: cred.subscriptionType ?? null, windows: [w('five_hour', '5 小时', 300), w('seven_day', '每周', 10080), w('seven_day_opus', '每周 · Opus', 10080), w('seven_day_sonnet', '每周 · Sonnet', 10080)].filter(Boolean) };
+    },
+  },
+  codex: {
+    async query(realDir, env) {
+      let auth;
+      try { auth = JSON.parse(readFileSync(join(realDir, 'auth.json'), 'utf8')); } catch { fail('NO_LOGIN', '该目录下没有 Codex 的登录信息（auth.json）'); }
+      if (!auth?.tokens?.access_token) fail('NO_LOGIN', 'Codex 不是 ChatGPT 账号登录（可能用的是 API Key），没有 5 小时 / 周额度');
+      const r = await httpGetJson('https://chatgpt.com/backend-api/wham/usage', [`Authorization: Bearer ${auth.tokens.access_token}`, ...(auth.tokens.account_id ? [`chatgpt-account-id: ${auth.tokens.account_id}`] : []), 'User-Agent: codex_cli_rs/0.50.0'], env);
+      if (r.status !== 200 || !r.json) fail(r.status === 401 ? 'TOKEN_EXPIRED' : 'LIMITS_UNAVAILABLE', r.error ?? `服务商返回 ${r.status}${r.json?.error?.code ? `：${String(r.json.error.code).slice(0, 60)}` : ''}`);
+      const rl = r.json.rate_limit ?? r.json.rate_limits ?? {};
+      const w = (src, fallbackKey) => {
+        if (!src) return null;
+        const seconds = src.limit_window_seconds ?? (src.window_minutes ? src.window_minutes * 60 : null);
+        const minutes = seconds ? Math.round(seconds / 60) : null;
+        const resets = src.reset_at ?? src.resets_at ?? (typeof src.reset_after_seconds === 'number' ? Date.now() + src.reset_after_seconds * 1000 : null);
+        const weekly = minutes ? minutes >= 1440 : fallbackKey === 'seven_day';
+        return { key: weekly ? 'seven_day' : 'five_hour', label: weekly ? '每周' : minutes && minutes !== 300 ? `${Math.round(minutes / 60)} 小时` : '5 小时', windowMinutes: minutes, usedPercent: pct(src.used_percent), resetsAt: toIso(resets) };
+      };
+      const windows = [w(rl.primary_window ?? rl.primary, 'five_hour'), w(rl.secondary_window ?? rl.secondary, 'seven_day')].filter(Boolean);
+      // 接口结构与预期不符时，只回传字段名（不含任何取值），便于排查
+      if (windows.length === 0) fail('LIMITS_UNPARSED', `无法识别服务商返回的额度结构（顶层字段：${Object.keys(r.json).slice(0, 12).join(', ')}）`);
+      // shape：仅字段名与类型（数值只保留窗口长度这类非敏感量），用于在接口结构变化时排查
+      const shape = (v, k = '') => (v === null ? null : Array.isArray(v) ? v.slice(0, 2).map((x) => shape(x)) : typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([kk, x]) => [kk, shape(x, kk)])) : /window_seconds|window_minutes/.test(k) ? v : typeof v);
+      return { plan: r.json.plan_type ?? null, windows, shape: shape(r.json) };
+    },
+  },
+};
+
+async function mainLimits(args) {
+  const provider = LIMIT_PROVIDERS[args.limits];
+  if (!provider) fail('UNSUPPORTED_SOURCE', '不支持的数据源');
+  if (!args.dir || !SAFE_PATH.test(args.dir) || args.dir.split('/').includes('..')) fail('BAD_ARGS', '目录参数不合法');
+  Object.assign(echo, { limits: args.limits, dir: args.dir });
+  let config;
+  try { config = JSON.parse(readFileSync(CONFIG_PATH, 'utf8')); } catch (err) { rethrowDone(err); fail('CONFIG_MISSING', `无法读取采集配置 ${CONFIG_PATH}`); }
+  if (!existsSync(args.dir)) fail('DIR_MISSING', '数据目录不存在');
+  const realDir = realpathSync(args.dir);
+  if (!dirAllowed(realDir, config.allowedDirs ?? [])) fail('DIR_NOT_ALLOWED', '目录不在本机采集白名单内');
+  const env = { PATH: process.env.PATH, HOME: process.env.HOME, ...(await proxyEnv(realDir)) };
+  const result = await provider.query(realDir, env);
+  finish({ status: 'ok', fetchedAt: new Date().toISOString(), ...result });
+}
+
 async function main() {
   const args = parseArgs();
+  if (args.limits !== undefined) return mainLimits(args);
   const source = SOURCES[args.source];
   if (!source) fail('UNSUPPORTED_SOURCE', '不支持的数据源');
   if (!args.dir || !SAFE_PATH.test(args.dir) || args.dir.split('/').includes('..')) fail('BAD_ARGS', '目录参数不合法');
