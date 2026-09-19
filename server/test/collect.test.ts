@@ -272,6 +272,13 @@ describe('邮件告警', () => {
     expect(body).toContain('server-b /home/developer/.claude（最近成功采集：从未成功）');
   });
 
+  it('用户没有登记邮箱时，本应发给本人的提醒改发给管理员', async () => {
+    await db.query('UPDATE users SET email = NULL WHERE id = $1', [zhangsan]);
+    await addRule(db, { metric: 'cost', period: 'daily', tiers: [50] });
+    await collect(db, fakeExecutor(() => report({ '2026-09-19': [opus(1, 60)] })), targetA, NOW);
+    expect((await outbox(db)).map((m) => m.to_addrs)).toEqual([['admin@example.com']]);
+  });
+
   it('团队与用户范围的规则只作用于对应用户', async () => {
     const lisi = await addUser(db, 'lisi', { team: 'infra' });
     const targetC = await addTarget(db, serverA, lisi, '/home/lisi/.claude');

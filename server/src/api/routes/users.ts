@@ -8,9 +8,12 @@ import { audit, currentUser, HttpError, mapDbError, notFound, parse } from '../h
 import { passwordSchema } from './auth.js';
 
 const budget = z.number().nonnegative().max(1e9).nullable();
+// 邮箱可选：空字符串视为不填
+const optionalEmail = z.preprocess((v) => (typeof v === 'string' && v.trim() === '' ? null : v), z.string().trim().email().max(320).nullable());
+
 const createSchema = z.object({
   name: z.string().trim().min(1).max(100),
-  email: z.string().trim().email().max(320),
+  email: optionalEmail.default(null),
   role: z.enum(['admin', 'user']).default('user'),
   team: z.string().trim().min(1).max(100).nullable().default(null),
   monthlyBudgetUsd: budget.default(null),
@@ -18,7 +21,7 @@ const createSchema = z.object({
 });
 const patchSchema = z.object({
   name: z.string().trim().min(1).max(100),
-  email: z.string().trim().email().max(320),
+  email: optionalEmail,
   role: z.enum(['admin', 'user']),
   team: z.string().trim().min(1).max(100).nullable(),
   monthlyBudgetUsd: budget,
@@ -53,6 +56,7 @@ export async function userRoutes(app: FastifyInstance, ctx: RouteContext): Promi
 
   app.post('/users', { preHandler: ctx.requireAdmin }, async (req, reply) => {
     const body = parse(createSchema, req.body);
+    if ((body.password || body.role === 'admin') && !body.email) throw new HttpError(400, '管理员或可登录的账户必须填写邮箱（邮箱即登录名）');
     const hash = body.password ? await hashPassword(body.password) : null;
     const res = await db.query(
       'INSERT INTO users (name, email, role, team, monthly_budget_usd, password_hash) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
@@ -68,6 +72,10 @@ export async function userRoutes(app: FastifyInstance, ctx: RouteContext): Promi
     const body = parse(patchSchema, req.body);
     const me = currentUser(req);
     if (id === me.id && (body.role === 'user' || body.isActive === false)) throw new HttpError(400, '不能降级或停用自己的管理员账户');
+    const current = (await db.query('SELECT email, role, (password_hash IS NOT NULL) AS can_login FROM users WHERE id = $1', [id])).rows[0];
+    if (!current) throw notFound('用户');
+    const nextEmail = body.email !== undefined ? body.email : current.email;
+    if (!nextEmail && (body.password || current.can_login || (body.role ?? current.role) === 'admin')) throw new HttpError(400, '管理员或可登录的账户必须填写邮箱（邮箱即登录名）');
 
     const sets: string[] = [];
     const values: unknown[] = [id];

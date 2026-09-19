@@ -157,13 +157,15 @@ export async function findIncompleteSources(tx: Tx, userId: string, now: Date, i
 }
 
 export async function adminEmails(tx: Tx): Promise<string[]> {
-  return (await tx.query("SELECT email FROM users WHERE role = 'admin' AND is_active ORDER BY email")).rows.map((r) => r.email);
+  return (await tx.query("SELECT email FROM users WHERE role = 'admin' AND is_active AND email IS NOT NULL ORDER BY email")).rows.map((r) => r.email);
 }
 
-async function resolveRecipients(tx: Tx, rule: RuleRow, user: { email: string; is_active: boolean }): Promise<string[]> {
+async function resolveRecipients(tx: Tx, rule: RuleRow, user: { email: string | null; is_active: boolean }): Promise<string[]> {
   const out = new Set<string>();
-  if (rule.notify_user && user.is_active) out.add(user.email.toLowerCase());
-  if (rule.notify_admins) for (const e of await adminEmails(tx)) out.add(e.toLowerCase());
+  const reachable = user.is_active && Boolean(user.email);
+  if (rule.notify_user && reachable) out.add(user.email!.toLowerCase());
+  // 规则要求通知本人、但该用户没有登记邮箱：改为通知管理员，避免告警无人收到
+  if (rule.notify_admins || (rule.notify_user && !reachable)) for (const e of await adminEmails(tx)) out.add(e.toLowerCase());
   for (const e of rule.extra_emails) out.add(e.toLowerCase());
   return [...out];
 }

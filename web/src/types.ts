@@ -58,7 +58,7 @@ export interface Overview {
 }
 
 export interface UserListItem {
-  id: string; name: string; email: string; role: Role; team: string | null; isActive: boolean; monthlyBudgetUsd: number | null; canLogin: boolean;
+  id: string; name: string; email: string | null; role: Role; team: string | null; isActive: boolean; monthlyBudgetUsd: number | null; canLogin: boolean;
   todayTokens: NumLike; todayCost: number; monthTokens: NumLike; monthCost: number; monthAlerts: number; targetCount: number; failingTargets: number;
 }
 export interface UserListResponse { today: string; month: string; users: UserListItem[] }
@@ -74,7 +74,7 @@ export interface UserSource {
 }
 
 export interface UserDetail {
-  user?: { id: string; name: string; email: string; team: string | null; role: Role; monthlyBudgetUsd: number | null; isActive: boolean };
+  user?: { id: string; name: string; email: string | null; team: string | null; role: Role; monthlyBudgetUsd: number | null; isActive: boolean };
   freshness: Meta;
   month: string;
   totals: Totals;

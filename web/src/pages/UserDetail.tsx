@@ -52,7 +52,7 @@ export function UserDetailPage() {
         <Card size="small" style={{ marginBottom: 16 }}>
           <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }}>
             <Descriptions.Item label="姓名">{u.name}{!u.isActive && <Tag style={{ marginLeft: 8 }}>已停用</Tag>}</Descriptions.Item>
-            <Descriptions.Item label="邮箱">{u.email}</Descriptions.Item>
+            <Descriptions.Item label="告警邮箱">{u.email ?? '未登记'}</Descriptions.Item>
             <Descriptions.Item label="团队">{u.team ?? '未分组'}</Descriptions.Item>
             <Descriptions.Item label="月预算">{u.monthlyBudgetUsd === null ? '未设预算' : fmtCost(u.monthlyBudgetUsd)}</Descriptions.Item>
           </Descriptions>

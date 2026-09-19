@@ -226,6 +226,19 @@ describe('管理操作', () => {
     expect((await send('PUT', '/api/settings/general', adminCookie, { ...general, collectIntervalHours: 4 })).statusCode).toBe(200);
   });
 
+  it('新增用户只需要姓名；邮箱可选，但管理员或可登录的账户必须有邮箱', async () => {
+    const plain = await send('POST', '/api/users', adminCookie, { name: '王五' });
+    expect(plain.statusCode).toBe(201);
+    expect((await send('POST', '/api/users', adminCookie, { name: '赵六', email: '' })).statusCode).toBe(201); // 多个无邮箱用户不冲突
+    const listed = (await get('/api/users', adminCookie)).json().users.find((u: { name: string }) => u.name === '王五');
+    expect(listed).toMatchObject({ email: null, canLogin: false });
+
+    expect((await send('POST', '/api/users', adminCookie, { name: '新管理员', role: 'admin', password: PASSWORD })).statusCode).toBe(400);
+    expect((await send('PATCH', `/api/users/${plain.json().id}`, adminCookie, { password: PASSWORD })).statusCode).toBe(400);
+    expect((await send('PATCH', `/api/users/${plain.json().id}`, adminCookie, { email: 'wangwu@example.com', password: PASSWORD })).statusCode).toBe(200);
+    expect((await send('PATCH', `/api/users/${plain.json().id}`, adminCookie, { email: null })).statusCode).toBe(400); // 可登录账户不能清空邮箱
+  });
+
   it('管理员不能降级或停用自己', async () => {
     const me = (await get('/api/auth/me', adminCookie)).json();
     expect((await send('PATCH', `/api/users/${me.id}`, adminCookie, { role: 'user' })).statusCode).toBe(400);
