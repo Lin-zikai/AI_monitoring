@@ -13,7 +13,7 @@ export function AlertEventsPage() {
   const isAdmin = me?.role === 'admin';
   const { message } = App.useApp();
   const [userId, setUserId] = useState<string>();
-  const [kind, setKind] = useState<'usage' | 'collection_failure'>();
+  const [kind, setKind] = useState<'usage' | 'collection_failure' | 'account_limit'>();
   const [emailStatus, setEmailStatus] = useState<EmailStatus>();
   const filters = useFetch(() => (isAdmin ? api.get<Filters>('/stats/filters') : Promise.resolve(undefined)), [isAdmin]);
   const events = useFetch(() => api.get<{ events: AlertEvent[] }>('/alerts/events', { userId, kind, emailStatus, limit: 300 }), [userId, kind, emailStatus]);
@@ -31,7 +31,7 @@ export function AlertEventsPage() {
             <Select allowClear showSearch optionFilterProp="label" placeholder="用户" style={{ width: 180 }} value={userId} onChange={setUserId}
               options={filters.data?.users.map((u) => ({ value: u.id, label: u.name }))} />
             <Select allowClear placeholder="类型" style={{ width: 150 }} value={kind} onChange={setKind}
-              options={[{ value: 'usage', label: '用量告警' }, { value: 'collection_failure', label: '采集失败' }]} />
+              options={[{ value: 'usage', label: '用量告警' }, { value: 'account_limit', label: '账号额度' }, { value: 'collection_failure', label: '采集失败' }]} />
             <Select allowClear placeholder="邮件状态" style={{ width: 150 }} value={emailStatus} onChange={setEmailStatus}
               options={[{ value: 'pending', label: '待发送' }, { value: 'sending', label: '发送中' }, { value: 'sent', label: '已发送' }, { value: 'failed', label: '发送失败' }]} />
           </Space>
@@ -43,16 +43,17 @@ export function AlertEventsPage() {
         pagination={{ pageSize: 50, hideOnSinglePage: true }} locale={{ emptyText: '没有告警记录' }}
         columns={[
           { title: '触发时间', width: 150, render: (_v, e) => fmtTime(e.createdAt) },
-          { title: '类型', width: 100, render: (_v, e) => (e.kind === 'usage' ? <Tag color="orange">用量告警</Tag> : <Tag color="red">采集失败</Tag>) },
+          { title: '类型', width: 100, render: (_v, e) => (e.kind === 'usage' ? <Tag color="orange">用量告警</Tag> : e.kind === 'account_limit' ? <Tag color="gold">账号额度</Tag> : <Tag color="red">采集失败</Tag>) },
           {
             title: isAdmin ? '用户 / 来源' : '来源', render: (_v, e) => (e.kind === 'usage'
               ? (isAdmin && e.userId ? <Link to={`/users/${e.userId}`}>{e.userName}</Link> : e.userName ?? '—')
+              : e.kind === 'account_limit' ? '共用账号'
               : <>{e.serverName ?? '（来源已删除）'}<div><Typography.Text type="secondary" style={{ fontSize: 12 }}>{e.dataDir}</Typography.Text></div></>),
           },
-          { title: '规则', render: (_v, e) => (e.kind === 'usage' ? <>{e.ruleName}<div><Typography.Text type="secondary" style={{ fontSize: 12 }}>{e.periodType && PERIOD_LABEL[e.periodType]}{e.metric && METRIC_LABEL[e.metric]}{e.metric === 'budget_pct' ? ` · ${e.tier}% 档` : ''}</Typography.Text></div></> : '连续采集失败') },
-          { title: '统计周期', dataIndex: 'periodKey', render: (v: string | null) => v ?? '—' },
-          { title: '触发值', align: 'right', render: (_v, e) => fmtMetricValue(e.metric, e.observedValue) },
-          { title: '阈值', align: 'right', render: (_v, e) => fmtMetricValue(e.metric, e.thresholdValue) },
+          { title: '规则', render: (_v, e) => (e.kind === 'usage' ? <>{e.ruleName}<div><Typography.Text type="secondary" style={{ fontSize: 12 }}>{e.periodType && PERIOD_LABEL[e.periodType]}{e.metric && METRIC_LABEL[e.metric]}{e.metric === 'budget_pct' ? ` · ${e.tier}% 档` : ''}</Typography.Text></div></> : e.kind === 'account_limit' ? e.ruleName : '连续采集失败') },
+          { title: '统计周期', render: (_v, e) => (e.kind === 'account_limit' ? (e.periodKey && e.periodKey !== 'unknown' ? `至 ${fmtTime(e.periodKey)} 刷新` : '—') : e.periodKey ?? '—') },
+          { title: '触发值', align: 'right', render: (_v, e) => (e.kind === 'account_limit' ? `已用 ${e.observedValue}%` : fmtMetricValue(e.metric, e.observedValue)) },
+          { title: '阈值', align: 'right', render: (_v, e) => (e.kind === 'account_limit' ? `已用 ${e.thresholdValue}%` : fmtMetricValue(e.metric, e.thresholdValue)) },
           {
             title: '数据状态', render: (_v, e) => (e.kind !== 'usage' ? '—' : e.incomplete
               ? <Tooltip title={`触发时部分来源尚未更新，数据截至 ${fmtTime(e.dataAsOf)}；实际用量可能更高`}><Tag color="warning">不完整</Tag></Tooltip>

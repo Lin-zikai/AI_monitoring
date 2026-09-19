@@ -78,7 +78,7 @@ export async function alertRoutes(app: FastifyInstance, ctx: RouteContext): Prom
     const me = currentUser(req);
     const q = parse(z.object({
       userId: z.string().uuid().optional(),
-      kind: z.enum(['usage', 'collection_failure']).optional(),
+      kind: z.enum(['usage', 'collection_failure', 'account_limit']).optional(),
       emailStatus: z.enum(['pending', 'sending', 'sent', 'failed']).optional(),
       limit: z.coerce.number().int().min(1).max(500).default(100),
     }), req.query);

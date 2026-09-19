@@ -26,7 +26,7 @@ async function tick(): Promise<void> {
   await queues.enqueueRuns(await findOrphanedRuns(db));
 }
 
-const limitsDeps = { db, executor: sshExecutor, masterKey: config.masterKey, log };
+const limitsDeps = { db, executor: sshExecutor, masterKey: config.masterKey, log, baseUrl: config.publicBaseUrl };
 const scheduleWorker = new Worker(SCHEDULE_QUEUE, async (job) => (job.name === 'limits' ? refreshAccountLimits(limitsDeps) : tick()), { connection });
 
 const collectWorker = new Worker<CollectJob>(COLLECT_QUEUE, async (job) => {

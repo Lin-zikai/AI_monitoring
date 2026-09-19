@@ -123,7 +123,7 @@ export interface AlertRuleInput {
 export interface AlertRule extends AlertRuleInput { id: string; scopeUserName: string | null; createdAt: string; updatedAt: string }
 
 export interface AlertEvent {
-  id: string; kind: 'usage' | 'collection_failure'; ruleName: string | null; userId: string | null; userName: string | null; metric: Metric | null;
+  id: string; kind: 'usage' | 'collection_failure' | 'account_limit'; ruleName: string | null; userId: string | null; userName: string | null; metric: Metric | null;
   periodType: Period | null; periodKey: string | null; tier: number | null; observedValue: number | null; thresholdValue: number | null;
   dataAsOf: string | null; incomplete: boolean; emailNote: string | null; createdAt: string; serverName: string | null; dataDir: string | null;
   outboxId: string | null; emailStatus: EmailStatus | null; emailAttempts: number | null; emailSentAt: string | null; emailError: string | null; emailTo: string[] | null;

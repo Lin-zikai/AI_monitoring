@@ -33,6 +33,18 @@ export const DEFAULT_GENERAL: GeneralSettings = {
   retentionDays: 0,
 };
 
+/** 账号额度提醒：任一窗口（5 小时 / 周）的剩余比例低于阈值时发邮件；同一窗口在同一刷新周期内只提醒一次 */
+export const limitAlertSchema = z.object({
+  enabled: z.boolean(),
+  remainingBelowPercent: z.number().min(1).max(99),
+  /** 5 小时窗口几小时就刷新一次，默认不为它发邮件，只看周额度 */
+  includeFiveHour: z.boolean().default(false),
+  notifyAdmins: z.boolean(),
+  emails: z.array(z.string().trim().email().max(320)).max(20),
+}).refine((v) => !v.enabled || v.notifyAdmins || v.emails.length > 0, { message: '至少需要一类收件人', path: ['emails'] });
+export type LimitAlertSettings = z.infer<typeof limitAlertSchema>;
+export const DEFAULT_LIMIT_ALERT: LimitAlertSettings = { enabled: false, remainingBelowPercent: 20, includeFiveHour: false, notifyAdmins: true, emails: [] };
+
 export const smtpSettingsSchema = z.object({
   host: z.string().min(1).max(253),
   port: z.number().int().min(1).max(65535),
@@ -62,6 +74,10 @@ export async function putSetting(db: Queryable, key: string, value: unknown): Pr
 
 export async function getGeneralSettings(db: Queryable): Promise<GeneralSettings> {
   return { ...DEFAULT_GENERAL, ...(await getSetting<Partial<GeneralSettings>>(db, 'general')) };
+}
+
+export async function getLimitAlertSettings(db: Queryable): Promise<LimitAlertSettings> {
+  return { ...DEFAULT_LIMIT_ALERT, ...(await getSetting<Partial<LimitAlertSettings>>(db, 'limitAlert')) };
 }
 
 export const getStoredSmtp = (db: Queryable) => getSetting<StoredSmtp>(db, 'smtp');

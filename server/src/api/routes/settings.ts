@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { sanitizeError } from '../../logger.js';
 import { smtpPasswordAad } from '../../mail/transport.js';
 import { seal } from '../../security/crypto.js';
-import { generalSettingsSchema, getGeneralSettings, getStoredSmtp, putSetting, smtpSettingsSchema, type StoredSmtp } from '../../settings.js';
+import { generalSettingsSchema, getGeneralSettings, getLimitAlertSettings, getStoredSmtp, limitAlertSchema, putSetting, smtpSettingsSchema, type StoredSmtp } from '../../settings.js';
 import type { RouteContext } from '../app.js';
 import { audit, HttpError, parse } from '../http.js';
 
@@ -25,6 +25,16 @@ export async function settingsRoutes(app: FastifyInstance, ctx: RouteContext): P
     // 采集周期或时区变更后，重新登记定时调度
     if (before.collectIntervalHours !== body.collectIntervalHours || before.timezone !== body.timezone) await ctx.queues.syncSchedule(db);
     await audit(db, req, 'settings.general.update', 'settings', 'general', { before, after: body });
+    return body;
+  });
+
+  app.get('/settings/limit-alert', admin, async () => getLimitAlertSettings(db));
+
+  app.put('/settings/limit-alert', admin, async (req) => {
+    const body = parse(limitAlertSchema, req.body);
+    const before = await getLimitAlertSettings(db);
+    await putSetting(db, 'limitAlert', body);
+    await audit(db, req, 'settings.limit_alert.update', 'settings', 'limitAlert', { before, after: body });
     return body;
   });
 

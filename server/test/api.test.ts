@@ -318,6 +318,17 @@ describe('管理操作', () => {
   });
 });
 
+describe('告警记录', () => {
+  it('可以按“账号额度”类型筛选', async () => {
+    await db.query("INSERT INTO alert_events (kind, dedupe_key, rule_name, source, observed_value, threshold_value) VALUES ('account_limit', 'limit:test', 'Codex 每周额度剩余不足 20%', 'codex', 88, 80)");
+    const res = await get('/api/alerts/events?kind=account_limit', adminCookie);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().events).toEqual([expect.objectContaining({ kind: 'account_limit', ruleName: 'Codex 每周额度剩余不足 20%', observedValue: 88 })]);
+    // 普通用户看不到账号级告警
+    expect((await get('/api/alerts/events', zhangsanCookie)).json().events.some((e: { kind: string }) => e.kind === 'account_limit')).toBe(false);
+  });
+});
+
 describe('请求体', () => {
   it('无请求体的动作型 POST 即使带 JSON content-type 也能处理', async () => {
     const server = (await get('/api/servers', adminCookie)).json().servers[0].id;

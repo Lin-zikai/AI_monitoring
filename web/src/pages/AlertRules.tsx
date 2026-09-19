@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { api, errorMessage } from '../api';
 import { PageTitle } from '../components/common';
 import { fmtCost, fmtFull, METRIC_LABEL, PERIOD_LABEL } from '../format';
+import { LimitAlertCard } from '../components/LimitAlertCard';
 import { useFetch } from '../hooks';
 import type { AlertRule, AlertRuleInput, Filters, Metric, Period, ScopeType } from '../types';
 
@@ -66,6 +67,7 @@ export function AlertRulesPage() {
       <PageTitle title="告警规则" extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => open('new')}>新增规则</Button>} />
       <Alert type="info" showIcon style={{ marginBottom: 16 }}
         title="告警在每次采集成功入库后评估（含手动采集），正常情况下从用量变化到收到提醒最长约一个采集周期。每个统计周期的每个档位只提醒一次；第一版仅提醒，不会停用账户或终止任务。" />
+      <LimitAlertCard />
       {rules.error && <Alert type="error" showIcon title={rules.error} style={{ marginBottom: 16 }} />}
       <Table<AlertRule>
         size="middle" rowKey="id" loading={rules.loading} dataSource={rules.data?.rules ?? []} pagination={false} scroll={{ x: 1000 }}

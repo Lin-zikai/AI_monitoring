@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { latestAccountLimits, refreshAccountLimits } from '../src/collect/limits.js';
+import { evaluateLimitAlerts, latestAccountLimits, refreshAccountLimits } from '../src/collect/limits.js';
 import { runCollection } from '../src/collect/runner.js';
 import { createAdhocBatch, ensureSlotBatch } from '../src/collect/scheduler.js';
 import type { Db } from '../src/db/pool.js';
@@ -388,6 +388,43 @@ describe('账号额度', () => {
     // Codex 没有任何采集成功的目标 → 明确说明，而不是空白
     expect(view.find((v) => v.provider === 'codex')).toMatchObject({ windows: [], fetchedAt: null, lastError: { code: 'NO_SOURCE' } });
     expect(JSON.stringify((await db.query('SELECT * FROM account_limit_snapshots')).rows)).not.toMatch(/token|Bearer|test-key/i);
+  });
+});
+
+describe('账号额度提醒', () => {
+  const windows = (fiveHour: number, weekly: number, weeklyReset = '2099-09-22T10:00:00.412Z') => [
+    { key: 'five_hour', label: '5 小时', windowMinutes: 300, usedPercent: fiveHour, resetsAt: '2099-09-19T21:30:00.000Z' },
+    { key: 'seven_day', label: '每周', windowMinutes: 10080, usedPercent: weekly, resetsAt: weeklyReset },
+  ];
+  const deps = async () => ({ db, executor: fakeExecutor(() => report({})), masterKey: (await import('./helpers.js')).masterKey, log: silentLog, baseUrl: 'https://usage.example.com' });
+  const enable = (extra: object = {}) => db.query("INSERT INTO settings (key, value) VALUES ('limitAlert', $1)", [JSON.stringify({ enabled: true, remainingBelowPercent: 20, notifyAdmins: false, emails: ['zyt@example.com'], ...extra })]);
+
+  it('周额度剩余不足 20% 时提醒一次；同一刷新周期不重复，刷新后重新计；5 小时窗口默认不提醒', async () => {
+    await enable();
+    const d = await deps();
+    expect(await evaluateLimitAlerts(d, 'claude-code', 'max', windows(95, 79), 'ai')).toBe(0); // 周额度还剩 21%；5 小时已用 95% 但不提醒
+    expect(await evaluateLimitAlerts(d, 'claude-code', 'max', windows(95, 83.5), 'ai')).toBe(1);
+    expect(await evaluateLimitAlerts(d, 'claude-code', 'max', windows(99, 91, '2099-09-22T10:00:00.828Z'), 'ai')).toBe(0); // 同一周期（刷新时间只是毫秒级抖动）
+    expect(await evaluateLimitAlerts(d, 'codex', 'pro', windows(0, 88).slice(1), 'ai')).toBe(1); // 另一个账号单独计
+    expect(await evaluateLimitAlerts(d, 'claude-code', 'max', windows(10, 85, '2099-09-29T10:00:00.000Z'), 'ai')).toBe(1); // 新的一周
+
+    const mails = await outbox(db);
+    expect(mails.map((m) => m.subject)).toEqual([
+      '[额度提醒] Claude Code 每周额度仅剩 16.5%（已用 83.5%）',
+      '[额度提醒] Codex 每周额度仅剩 12%（已用 88%）',
+      '[额度提醒] Claude Code 每周额度仅剩 15%（已用 85%）',
+    ]);
+    expect(mails[0]).toMatchObject({ to_addrs: ['zyt@example.com'] });
+    expect(mails[0].body_text).toContain('剩余：16.5%（低于提醒线 20%）');
+    expect(mails[0].body_text).toContain('5 小时：已用 95%');
+  });
+
+  it('打开“5 小时窗口也提醒”后才为它发信；未启用时什么都不做', async () => {
+    const d = await deps();
+    expect(await evaluateLimitAlerts(d, 'claude-code', 'max', windows(95, 95), 'ai')).toBe(0); // 未启用
+    await enable({ includeFiveHour: true });
+    expect(await evaluateLimitAlerts(d, 'claude-code', 'max', windows(95, 10), 'ai')).toBe(1);
+    expect((await outbox(db))[0].subject).toBe('[额度提醒] Claude Code 5 小时额度仅剩 5%（已用 95%）');
   });
 });
 

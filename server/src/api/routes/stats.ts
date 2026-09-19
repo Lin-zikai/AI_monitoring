@@ -96,7 +96,8 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
   app.get('/limits', { preHandler: ctx.requireAdmin }, async () => ({ limits: await latestAccountLimits(db) }));
 
   app.post('/limits/refresh', { preHandler: ctx.requireAdmin, config: { rateLimit: { max: 6, timeWindow: '1 minute' } } }, async (req) => {
-    const outcomes = await refreshAccountLimits({ db, executor: ctx.executor, masterKey: ctx.config.masterKey, log: req.log as unknown as Logger });
+    const outcomes = await refreshAccountLimits({ db, executor: ctx.executor, masterKey: ctx.config.masterKey, log: req.log as unknown as Logger, baseUrl: ctx.config.publicBaseUrl });
+    await ctx.queues.kickMail();
     return { outcomes, limits: await latestAccountLimits(db) };
   });
 
