@@ -23,7 +23,7 @@ const COLLECTOR_PATH = process.env.COLLECTOR_SCRIPT_PATH
 export type InstallMode = 'auto' | 'latest' | 'pinned';
 
 export function buildInstallScript(opts: { ccusageSpec?: string; mode?: InstallMode; latestSpec?: string } = {}): string {
-  const mode = opts.mode ?? 'auto';
+  const mode = opts.mode ?? 'latest';
   const latestSpec = opts.latestSpec ?? 'ccusage@latest';
   const collector = readFileSync(COLLECTOR_PATH).toString('base64');
   const spec = opts.ccusageSpec ?? `ccusage@${CCUSAGE_VERSION}`;
@@ -38,19 +38,32 @@ node_ok() { [ -x "$1" ] && [ "$("$1" -p 'Number(process.versions.node.split(".")
 mkdir -p "$DIR"
 login_which() { bash -lc "command -v $1" 2>/dev/null | tail -1 || true; } # 非交互 SSH 会话的 PATH 往往不含 nvm / npm 全局目录
 
-# 1. 已经装过 ccusage 就直接复用，不重复安装
-CC=""; CC_MODE=installed
-if [ "$MODE" = auto ]; then
-  for c in "$(command -v ccusage 2>/dev/null || true)" "$(login_which ccusage)" "$HOME/.npm-global/bin/ccusage" "$HOME/.local/bin/ccusage" \
+# 1. 找远端已经装过的 ccusage：auto 模式直接复用；latest 模式把它作为取不到最新版时的后备
+EXISTING=""
+if [ "$MODE" != pinned ]; then
+  for c in "$(command -v ccusage 2>/dev/null || true)" "$(login_which ccusage)" "$HOME/.npm-global/bin/ccusage" "$HOME/.local/bin/ccusage" \\
            "$HOME/.bun/bin/ccusage" "$HOME"/.nvm/versions/node/*/bin/ccusage /usr/local/bin/ccusage /usr/bin/ccusage; do
-    if [ -n "$c" ] && [ -x "$c" ]; then CC="$c"; CC_MODE=reused; break; fi
+    if [ -n "$c" ] && [ -x "$c" ]; then EXISTING="$c"; break; fi
   done
 fi
+CC=""; CC_MODE=installed
+if [ "$MODE" = auto ] && [ -n "$EXISTING" ]; then CC="$EXISTING"; CC_MODE=reused; fi
 
 # 2. Node：优先用远端已有的（含 ccusage 同目录的），都不满足才下载
 NODE_BIN=""
-for candidate in "$DIR/node/bin/node" "\${CC:+$(dirname "$CC")/node}" "$(command -v node 2>/dev/null || true)" "$(login_which node)"; do
-  if [ -n "$candidate" ] && node_ok "$candidate" && { [ -n "$CC" ] || [ -x "$(dirname "$candidate")/npx" ]; }; then NODE_BIN="$candidate"; break; fi
+NODE_CANDIDATES="$DIR/node/bin/node
+\${EXISTING:+$(dirname "$EXISTING")/node}
+$(command -v node 2>/dev/null || true)
+$(login_which node)"
+for need_npx in 1 0; do
+  # 先找带 npx 的（始终最新 / 安装都需要）；已有 ccusage 时退而求其次，接受不带 npx 的 Node
+  [ "$need_npx" = 0 ] && [ -z "$EXISTING" ] && break
+  while IFS= read -r candidate; do
+    if [ -z "$NODE_BIN" ] && [ -n "$candidate" ] && node_ok "$candidate" && { [ "$need_npx" = 0 ] || [ -x "$(dirname "$candidate")/npx" ]; }; then NODE_BIN="$candidate"; fi
+  done <<CANDIDATES
+$NODE_CANDIDATES
+CANDIDATES
+  [ -n "$NODE_BIN" ] && break
 done
 
 if [ -z "$NODE_BIN" ]; then
@@ -75,15 +88,25 @@ NODE_DIR="$(dirname "$NODE_BIN")"
 log "使用 Node $("$NODE_BIN" --version)（$NODE_BIN）"
 export PATH="$NODE_DIR:$PATH"
 
-if [ "$MODE" = latest ]; then
+version_of() { "$@" --version 2>/dev/null | "$NODE_BIN" -e 'let s="";process.stdin.on("data",(d)=>{s+=d}).on("end",()=>console.log((/[0-9]+[.][0-9]+[.][0-9]+/.exec(s)||[""])[0]))'; }
+
+VERSION=""
+if [ "$MODE" = latest ] && [ -x "$NODE_DIR/npx" ]; then
   # 每次采集都经 npx --yes 运行：有新版本时自动确认更新，再取数
-  CC_MODE=latest; CC="$NODE_DIR/npx"; CC_DIR="$NODE_DIR"
-  cc() { "$NODE_DIR/npx" --yes '${latestSpec}' "$@"; }
-  CC_JSON="\\"ccusageCommand\\": [\\"$NODE_DIR/npx\\", \\"--yes\\", \\"${latestSpec}\\"]"
   log "使用 npx --yes ${latestSpec}（每次采集自动更新到最新版）"
-else
+  VERSION="$(version_of "$NODE_DIR/npx" --yes '${latestSpec}')"
+  if [ -n "$VERSION" ]; then
+    CC_MODE=latest; CC="$NODE_DIR/npx"; CC_DIR="\${EXISTING:+$(dirname "$EXISTING")}"; CC_DIR="\${CC_DIR:-$NODE_DIR}"
+    cc() { "$NODE_DIR/npx" --yes '${latestSpec}' "$@"; }
+    CC_JSON="\\"ccusageCommand\\": [\\"$NODE_DIR/npx\\", \\"--yes\\", \\"${latestSpec}\\"]\${EXISTING:+, \\"ccusageBin\\": \\"$EXISTING\\"}"
+  else
+    log "取不到最新版（远端可能访问不了 npm 源）"
+  fi
+fi
+if [ -z "$VERSION" ]; then
+  if [ -z "$CC" ] && [ -n "$EXISTING" ]; then CC="$EXISTING"; CC_MODE=reused; fi
   if [ -n "$CC" ]; then
-    log "复用已安装的 ccusage：$CC"
+    log "使用已安装的 ccusage：$CC"
   else
     log "安装 ${spec}"
     npm install --prefix "$DIR" --no-audit --no-fund --loglevel=error '${spec}' >&2 \\
@@ -94,10 +117,9 @@ else
   CC_DIR="$(dirname "$CC")"
   cc() { "$CC" "$@"; }
   CC_JSON="\\"ccusageBin\\": \\"$CC\\""
+  VERSION="$(version_of "$CC")"
+  [ -n "$VERSION" ] || { log "无法运行 ccusage：$CC"; exit 24; }
 fi
-
-VERSION="$(cc --version 2>/dev/null | "$NODE_BIN" -e 'let s="";process.stdin.on("data",(d)=>{s+=d}).on("end",()=>console.log((/[0-9]+[.][0-9]+[.][0-9]+/.exec(s)||[""])[0]))')"
-[ -n "$VERSION" ] || { log "无法运行 ccusage（$CC_MODE）：远端需要能访问 npm 源"; exit 24; }
 # 采集依赖 ccusage claude daily --breakdown；较老的 ccusage 没有这个子命令
 case "$(cc claude daily --help 2>&1 || true)" in
   *--breakdown*) ;;

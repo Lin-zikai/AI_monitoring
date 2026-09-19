@@ -26,7 +26,7 @@ export interface Filters {
   teams: string[];
 }
 
-export type Dimension = 'date' | 'user' | 'server' | 'model' | 'team';
+export type Dimension = 'date' | 'user' | 'server' | 'model' | 'source' | 'team';
 
 export interface Measures {
   totalTokens: NumLike;

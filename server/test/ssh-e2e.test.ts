@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ssh2 from 'ssh2';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { claudeCodeAdapter, parseEnvelope } from '../src/collect/adapter.js';
+import { claudeCodeAdapter, codexAdapter, parseEnvelope } from '../src/collect/adapter.js';
 import { buildCollectCommand } from '../src/collect/command.js';
 import { installCollector } from '../src/collect/install.js';
 import { hostKeyFingerprint, scanHostKey, sshExecutor, type SshTarget } from '../src/ssh/client.js';
@@ -127,11 +127,12 @@ describe('自动安装采集组件', () => {
   /** 假 ccusage：version 与是否支持 `claude daily --breakdown` 可控 */
   function writeFakeCcusage(file: string, version: string, modern = true): void {
     const sample = JSON.stringify(report({ '2026-09-19': [{ model: 'claude-opus-5', input: 10, cost: 0.01 }] }));
+    const codexSample = readFileSync(new URL('./fixtures/ccusage-20.0.23-codex-daily.json', import.meta.url), 'utf8');
     writeFileSync(file, `#!/usr/bin/env node
 const a = process.argv.slice(2);
 if (a[0] === '--version') console.log('ccusage ${version}');
 else if (a.includes('--help')) console.log(${modern} && a[0] === 'claude' ? 'OPTIONS: -b, --breakdown' : 'unknown command');
-else console.log(${JSON.stringify(sample)});
+else console.log(a[0] === 'codex' ? ${JSON.stringify(codexSample)} : ${JSON.stringify(sample)});
 `);
     chmodSync(file, 0o755);
   }
@@ -175,12 +176,12 @@ else console.log(${JSON.stringify(sample)});
   }
 
   it('远端没有 ccusage 时安装固定版本并锁定版本号；重复安装幂等', async () => {
-    const result = await installCollector(sshExecutor, shellTarget, { ccusageSpec: fakePkg, timeoutMs: 120_000 });
+    const result = await installCollector(sshExecutor, shellTarget, { mode: 'auto', ccusageSpec: fakePkg, timeoutMs: 120_000 });
     expect(result).toMatchObject({ collectCommand: `${installDir()}/ccusage-collect`, ccusageMode: 'installed', ccusageVersion: '20.0.23', versionMismatch: false, defaultDataDir: `${home}/.claude` });
     expect(JSON.parse(readFileSync(join(installDir(), 'config.json'), 'utf8')).expectedCcusageVersion).toBe('20.0.23');
 
     const envelope = await collectWith(result.collectCommand);
-    expect(envelope).toMatchObject({ collectorVersion: '1.2.0', ccusageVersion: '20.0.23' });
+    expect(envelope).toMatchObject({ collectorVersion: '1.3.0', ccusageVersion: '20.0.23' });
     expect(claudeCodeAdapter.parse(envelope.report)[0]).toMatchObject({ model: 'claude-opus-5', totalTokens: 10 });
     expect((await installCollector(sshExecutor, shellTarget, { mode: 'pinned', ccusageSpec: fakePkg, timeoutMs: 120_000 })).collectCommand).toBe(result.collectCommand);
   }, 240_000);
@@ -191,7 +192,7 @@ else console.log(${JSON.stringify(sample)});
     const existing = join(home, '.npm-global', 'bin', 'ccusage');
     writeFakeCcusage(existing, '20.1.0');
 
-    const result = await installCollector(sshExecutor, shellTarget, { ccusageSpec: '/nonexistent/should-not-be-installed', timeoutMs: 120_000 });
+    const result = await installCollector(sshExecutor, shellTarget, { mode: 'auto', ccusageSpec: '/nonexistent/should-not-be-installed', timeoutMs: 120_000 });
     expect(result).toMatchObject({ ccusageMode: 'reused', ccusagePath: existing, ccusageVersion: '20.1.0', versionMismatch: true });
     expect(existsSync(join(installDir(), 'node_modules'))).toBe(false);
     expect(JSON.parse(readFileSync(join(installDir(), 'config.json'), 'utf8'))).toMatchObject({ ccusageBin: existing, expectedCcusageVersion: null });
@@ -202,16 +203,34 @@ else console.log(${JSON.stringify(sample)});
 
   it('已装的 ccusage 过旧（没有 claude daily --breakdown）时不擅自覆盖，明确报告不兼容', async () => {
     writeFakeCcusage(join(home, '.npm-global', 'bin', 'ccusage'), '15.3.1', false);
-    await expect(installCollector(sshExecutor, shellTarget, { timeoutMs: 120_000 })).rejects.toMatchObject({ code: 'CCUSAGE_INCOMPATIBLE', message: expect.stringContaining('15.3.1') });
+    await expect(installCollector(sshExecutor, shellTarget, { mode: 'auto', timeoutMs: 120_000 })).rejects.toMatchObject({ code: 'CCUSAGE_INCOMPATIBLE', message: expect.stringContaining('15.3.1') });
   }, 120_000);
 
-  it('“始终最新”模式经 npx --yes 运行，每次采集自动确认更新', async () => {
-    const result = await installCollector(sshExecutor, shellTarget, { mode: 'latest', latestSpec: fakePkg, timeoutMs: 180_000 });
+  it('默认模式：经 npx --yes 始终使用最新版；Claude Code 与 Codex 都能采集', async () => {
+    const existing = join(home, '.npm-global', 'bin', 'ccusage');
+    writeFakeCcusage(existing, '20.1.0');
+    const result = await installCollector(sshExecutor, shellTarget, { latestSpec: fakePkg, timeoutMs: 180_000 });
     expect(result).toMatchObject({ ccusageMode: 'latest', ccusageVersion: '20.0.23' });
-    const config = JSON.parse(readFileSync(join(installDir(), 'config.json'), 'utf8'));
+    const configPath = join(installDir(), 'config.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf8'));
     expect(config.ccusageCommand.slice(1)).toEqual(['--yes', fakePkg]);
-    expect(config.expectedCcusageVersion).toBeNull();
+    expect(config).toMatchObject({ expectedCcusageVersion: null, ccusageBin: existing }); // 已装的那份留作后备
     expect((await collectWith(result.collectCommand)).ccusageVersion).toBe('20.0.23');
+
+    mkdirSync(join(home, '.codex'), { recursive: true });
+    const codexReq = { ...request(join(home, '.codex')), source: 'codex' };
+    const codexOut = await sshExecutor.exec(shellTarget, buildCollectCommand(result.collectCommand, codexReq), 60_000);
+    const rows = codexAdapter.parse(parseEnvelope(codexOut.stdout, codexReq).report);
+    expect(rows).toEqual([expect.objectContaining({ model: 'gpt-5', totalTokens: 754, costUsd: '0.003200' })]);
+
+    // 某一轮采集时取不到最新版（npm 源不可达）：退回已安装的那份，这一轮照常采到
+    writeFileSync(configPath, JSON.stringify({ ...config, ccusageCommand: [config.ccusageCommand[0], '--yes', '/nonexistent/pkg'] }));
+    expect((await collectWith(result.collectCommand)).ccusageVersion).toBe('20.1.0');
+  }, 240_000);
+
+  it('安装时就取不到最新版：自动改用远端已安装的 ccusage', async () => {
+    const result = await installCollector(sshExecutor, shellTarget, { latestSpec: '/nonexistent/pkg', timeoutMs: 180_000 });
+    expect(result).toMatchObject({ ccusageMode: 'reused', ccusageVersion: '20.1.0' });
   }, 240_000);
 
   it('密钥被 forced command 限制时给出明确说明，而不是笼统的失败', async () => {

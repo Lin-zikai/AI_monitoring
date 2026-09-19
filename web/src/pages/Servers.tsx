@@ -16,34 +16,19 @@ const { Text, Paragraph } = Typography;
 
 // ---------------------------------------------------------------- 凭据
 
-type InstallMode = 'auto' | 'latest' | 'pinned';
+const INSTALL_NOTE = '平台会用这台服务器的 SSH 账户登录，只在其家目录的 ~/.local/share/usage-monitor/ 下放置采集脚本与配置，不需要 root，不改动系统目录。ccusage 始终使用最新版：每次采集都通过 npx --yes ccusage@latest 运行，有新版本时自动确认更新后再取数；远端已装过的 ccusage 不会被改动，只在取不到最新版时作为后备。要求该密钥在远端有普通 shell 权限。';
 
-const INSTALL_MODES: Array<{ value: InstallMode; label: string; note: string }> = [
-  { value: 'auto', label: '自动（推荐）', note: '远端已经装过 ccusage 就直接复用，不重新安装；没有才装一份。不锁定版本号，你自己升级 ccusage 后采集照常进行。' },
-  { value: 'latest', label: '始终使用最新版', note: '每次采集都通过 npx --yes ccusage@latest 运行：有新版本时自动确认更新，再取数。每次采集都需要远端能访问 npm 源；新版若改了输出格式，平台会校验失败并保留旧数据。' },
-  { value: 'pinned', label: '固定版本', note: '在平台专用目录里装一份固定版本（与平台核对过输出格式的版本），不影响远端已有的 ccusage。多台服务器费用口径最一致。' },
-];
+/** 数据源的显示名与家目录下的默认目录名 */
+const SOURCE_META: Record<string, { label: string; dir: string }> = { 'claude-code': { label: 'Claude Code', dir: '.claude' }, codex: { label: 'Codex', dir: '.codex' } };
+const sourceLabel = (s: string) => SOURCE_META[s]?.label ?? s;
 
-/** 安装对话框的内容：说明 + 模式选择。选择结果写回 choice.mode。 */
-function InstallOptions({ choice, lead }: { choice: { mode: InstallMode }; lead?: string }) {
-  const [mode, setMode] = useState<InstallMode>(choice.mode);
-  return (
-    <div>
-      {lead && <Paragraph type="warning">{lead}</Paragraph>}
-      <Paragraph>平台会用这台服务器的 SSH 账户登录，只在其家目录的 <Text code>~/.local/share/usage-monitor/</Text> 下放置采集脚本与配置。不需要 root，不改动系统目录；远端已有的 Node.js 与 ccusage 会直接复用，缺少时才下载。要求该密钥在远端有普通 shell 权限。</Paragraph>
-      <Radio.Group value={mode} onChange={(e) => { choice.mode = e.target.value; setMode(e.target.value); }} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {INSTALL_MODES.map((m) => (
-          <Radio key={m.value} value={m.value}>
-            <div><Text strong>{m.label}</Text></div>
-            <Text type="secondary" style={{ fontSize: 12 }}>{m.note}</Text>
-          </Radio>
-        ))}
-      </Radio.Group>
-    </div>
-  );
+/** 从自动安装登记的采集命令反推远端家目录；否则按惯例猜 /home/<用户名> */
+function guessHome(server: Server): string {
+  const m = /^(\/.+)\/\.local\/share\/usage-monitor\/ccusage-collect$/.exec(server.collectCommand);
+  return m ? m[1]! : server.sshUsername === 'root' ? '/root' : `/home/${server.sshUsername}`;
 }
 
-const CCUSAGE_MODE_TEXT: Record<string, string> = { reused: '复用远端已安装的 ccusage', installed: '已安装平台专用的固定版本', latest: '每次采集经 npx --yes 自动更新到最新版' };
+const CCUSAGE_MODE_TEXT: Record<string, string> = { latest: '每次采集自动更新到最新版（npx --yes ccusage@latest）', reused: '远端取不到最新版，已改用远端已安装的 ccusage', installed: '远端取不到最新版且没有已装的 ccusage，已安装一份固定版本' };
 
 const MAX_KEY_FILE_BYTES = 20_000;
 
@@ -344,7 +329,7 @@ function HostKeyModal({ server, onClose, onSaved }: { server: Server | null; onC
 // ---------------------------------------------------------------- 采集目标
 
 interface TargetForm {
-  userId: string; source: string; dataDir: string; sshUsername?: string; credentialId?: string; sharedAccount: boolean;
+  userId: string; source: string; dataDir: string; sources?: string[]; dirs?: Record<string, string>; sshUsername?: string; credentialId?: string; sharedAccount: boolean;
   sourceStartDate?: Dayjs | null; sourceEndDate?: Dayjs | null; enabled: boolean;
 }
 
@@ -360,17 +345,32 @@ function TargetModal({ state, credentials, users, sources, onClose, onSaved }: {
     if (!state) return;
     const v = await form.validateFields();
     const common = {
-      dataDir: v.dataDir.trim(), sshUsername: v.sshUsername?.trim() || null, credentialId: v.credentialId ?? null, sharedAccount: v.sharedAccount,
+      sshUsername: v.sshUsername?.trim() || null, credentialId: v.credentialId ?? null, sharedAccount: v.sharedAccount,
       sourceStartDate: v.sourceStartDate ? v.sourceStartDate.format('YYYY-MM-DD') : null, sourceEndDate: v.sourceEndDate ? v.sourceEndDate.format('YYYY-MM-DD') : null, enabled: v.enabled,
     };
     setSaving(true);
     try {
-      if (target) await api.patch(`/targets/${target.id}`, common);
-      else await api.post(`/servers/${state.server.id}/targets`, { ...common, userId: v.userId, source: v.source });
-      message.success(target ? '已保存' : '采集目标已添加；可先“测试目录”，再“立即采集”完成首次历史回填');
+      if (target) {
+        await api.patch(`/targets/${target.id}`, { ...common, dataDir: v.dataDir.trim() });
+        message.success('已保存');
+      } else {
+        // 每个勾选的数据源各建一个采集目标；其中一个失败不影响其他
+        const failed: string[] = [];
+        for (const source of v.sources ?? []) {
+          try {
+            await api.post(`/servers/${state.server.id}/targets`, { ...common, userId: v.userId, source, dataDir: (v.dirs?.[source] ?? '').trim() });
+          } catch (err) { failed.push(`${sourceLabel(source)}：${errorMessage(err)}`); }
+        }
+        if (failed.length) { message.error(failed.join('；')); onSaved(); return; }
+        message.success('采集目标已添加；可先“测试目录”，再“立即采集”完成首次历史回填');
+      }
       onClose(); onSaved();
     } catch (err) { message.error(errorMessage(err)); } finally { setSaving(false); }
   };
+
+  const available = sources.length ? sources : ['claude-code'];
+  const home = state ? guessHome(state.server) : '';
+  const picked: string[] = Form.useWatch('sources', form) ?? [];
 
   const initial: Partial<TargetForm> = target
     ? {
@@ -378,7 +378,10 @@ function TargetModal({ state, credentials, users, sources, onClose, onSaved }: {
       sharedAccount: target.sharedAccount, sourceStartDate: target.sourceStartDate ? dayjs(target.sourceStartDate) : null,
       sourceEndDate: target.sourceEndDate ? dayjs(target.sourceEndDate) : null, enabled: target.enabled,
     }
-    : { source: sources[0] ?? 'claude-code', sharedAccount: false, enabled: true };
+    : {
+      sources: available, dirs: Object.fromEntries(available.map((src) => [src, `${home}/${SOURCE_META[src]?.dir ?? `.${src}`}`])),
+      sharedAccount: false, enabled: true,
+    };
 
   return (
     <Modal title={`${target ? '编辑' : '添加'}采集目标 · ${state?.server.name ?? ''}`} open={state !== null} onOk={submit} confirmLoading={saving} onCancel={onClose} destroyOnHidden width={600}
@@ -389,14 +392,26 @@ function TargetModal({ state, credentials, users, sources, onClose, onSaved }: {
             extra={target ? '修改归属请使用“调整绑定”，以保留历史归属' : undefined}>
             <Select showSearch optionFilterProp="label" disabled={Boolean(target)} options={users.map((u) => ({ value: u.id, label: u.team ? `${u.name}（${u.team}）` : u.name }))} />
           </Form.Item>
-          <Form.Item name="source" label="数据源" style={{ width: 200 }}>
-            <Select disabled={Boolean(target)} options={(sources.length ? sources : ['claude-code']).map((s) => ({ value: s, label: s }))} />
-          </Form.Item>
+          {target && <Form.Item label="数据源" style={{ width: 200 }}><Input disabled value={sourceLabel(target.source)} /></Form.Item>}
         </Space>
-        <Form.Item name="dataDir" label="数据目录（服务器上的绝对路径）" tooltip="Claude Code 通常为 /home/<用户>/.claude。需同时写入该服务器采集脚本的目录白名单。"
-          rules={[{ required: true, message: '请输入数据目录' }, { pattern: /^\/[A-Za-z0-9._@+\-/]*$/, message: '必须是不含空格与特殊字符的绝对路径' }]}>
-          <Input placeholder="/home/zhangsan/.claude" style={{ fontFamily: 'monospace' }} />
-        </Form.Item>
+        {target ? (
+          <Form.Item name="dataDir" label="数据目录（服务器上的绝对路径）"
+            rules={[{ required: true, message: '请输入数据目录' }, { pattern: /^\/[A-Za-z0-9._@+\-/]*$/, message: '必须是不含空格与特殊字符的绝对路径' }]}>
+            <Input style={{ fontFamily: 'monospace' }} />
+          </Form.Item>
+        ) : (
+          <>
+            <Form.Item name="sources" label="数据源（可多选，每个数据源各建一个采集目标）" rules={[{ required: true, type: 'array', min: 1, message: '至少选择一个数据源' }]}>
+              <Checkbox.Group options={available.map((src) => ({ value: src, label: sourceLabel(src) }))} />
+            </Form.Item>
+            {available.filter((src) => picked.includes(src)).map((src) => (
+              <Form.Item key={src} name={['dirs', src]} label={`${sourceLabel(src)} 数据目录`} tooltip="服务器上的绝对路径；已按该 SSH 账户的家目录自动填写，采集别人的目录时请修改。"
+                rules={[{ required: true, message: '请输入数据目录' }, { pattern: /^\/[A-Za-z0-9._@+\-/]*$/, message: '必须是不含空格与特殊字符的绝对路径' }]}>
+                <Input style={{ fontFamily: 'monospace' }} />
+              </Form.Item>
+            ))}
+          </>
+        )}
         <Form.Item name="sharedAccount" valuePropName="checked" extra="多人共用同一账户和目录且记录无可靠身份字段时勾选：用量只能整体归属为共享账户。">
           <Checkbox>这是一个共享账户 / 共享目录</Checkbox>
         </Form.Item>
@@ -578,10 +593,10 @@ export function ServersPage() {
     } catch (err) { message.error(errorMessage(err)); } finally { setTesting(null); }
   };
 
-  const installCollector = async (s: Server, mode: InstallMode) => {
+  const installCollector = async (s: Server) => {
     const progress = modal.info({ title: `正在 ${s.name} 上配置采集组件…`, content: '通过 SSH 执行，通常需要几秒到几分钟，请不要关闭页面。', okButtonProps: { loading: true, disabled: true }, okText: '进行中', keyboard: false, maskClosable: false });
     try {
-      const r = await api.post<{ ok: boolean; code?: string; message?: string; collectCommand?: string; nodeVersion?: string; ccusageVersion?: string; defaultDataDir?: string; ccusageMode?: string; ccusagePath?: string; versionMismatch?: boolean }>(`/servers/${s.id}/install-collector`, { mode });
+      const r = await api.post<{ ok: boolean; code?: string; message?: string; collectCommand?: string; nodeVersion?: string; ccusageVersion?: string; defaultDataDir?: string; ccusageMode?: string; ccusagePath?: string; versionMismatch?: boolean }>(`/servers/${s.id}/install-collector`);
       progress.destroy();
       if (r.ok) {
         modal.success({
@@ -591,22 +606,16 @@ export function ServersPage() {
               <Paragraph>{CCUSAGE_MODE_TEXT[r.ccusageMode ?? ''] ?? ''}：ccusage {r.ccusageVersion}{r.ccusageMode === 'reused' ? <>（<Text code>{r.ccusagePath}</Text>）</> : null}，Node {r.nodeVersion}。</Paragraph>
               {r.versionMismatch && <Paragraph type="warning">该版本与平台核对过输出格式的版本不同：可以正常采集，但估算费用的口径可能与其他服务器略有差异（每行统计都会记录当时的版本）。</Paragraph>}
               <Paragraph>采集命令已自动登记为 <Text code>{r.collectCommand}</Text></Paragraph>
-              <Paragraph style={{ marginBottom: 0 }}>下一步：展开该服务器“添加采集目标”。该账户自己的数据目录一般是 <Text code copyable>{r.defaultDataDir}</Text></Paragraph>
+              <Paragraph style={{ marginBottom: 0 }}>下一步：展开该服务器点“添加采集目标”，勾选要采集的数据源（Claude Code、Codex），目录会自动填好。</Paragraph>
             </div>
           ),
         });
-      } else if (r.code === 'CCUSAGE_INCOMPATIBLE') {
-        // 远端已装的 ccusage 太旧：不擅自覆盖，让管理员改选其他模式（都不会动远端原有的那份）
-        askInstall(s, '未做任何改动', `${r.message ?? '远端已安装的 ccusage 版本不兼容'}。可以改用下面两种模式之一，它们都不会改动远端原有的 ccusage。`, 'latest');
       } else modal.error({ title: '未成功', width: 640, content: <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12, margin: 0 }}>{`${r.code ? `${r.code}：` : ''}${r.message ?? ''}`}</pre> });
       servers.reload();
     } catch (err) { progress.destroy(); message.error(errorMessage(err)); }
   };
 
-  const askInstall = (s: Server, title: string, lead?: string, initial: InstallMode = 'auto') => {
-    const choice = { mode: initial };
-    modal.confirm({ title, width: 600, okText: '开始', cancelText: '稍后', content: <InstallOptions choice={choice} lead={lead} />, onOk: () => { void installCollector(s, choice.mode); } });
-  };
+  const askInstall = (s: Server, title: string) => modal.confirm({ title, width: 560, okText: '开始', cancelText: '稍后', content: INSTALL_NOTE, onOk: () => { void installCollector(s); } });
 
   const testTarget = async (t: Target) => {
     setTesting(t.id);
@@ -653,7 +662,7 @@ export function ServersPage() {
       columns={[
         { title: '数据目录', render: (_v, t) => <Space size={4} wrap><Text code>{t.dataDir}</Text>{t.sharedAccount && <Tag color="purple">共享账户</Tag>}{t.hasFlaggedData && <Tooltip title="存在保留的历史值或异常减少标记，见采集记录"><Tag color="warning">待核查</Tag></Tooltip>}</Space> },
         { title: '绑定用户', dataIndex: 'userName' },
-        { title: '数据源', dataIndex: 'source' },
+        { title: '数据源', dataIndex: 'source', render: (v: string) => sourceLabel(v) },
         { title: 'SSH 登录', render: (_v, t) => (t.sshUsername || t.credentialId ? <Tooltip title="该目标覆盖了服务器级 SSH 登录"><Tag>{t.sshUsername ?? s.sshUsername} · 单独配置</Tag></Tooltip> : <Text type="secondary">同服务器</Text>) },
         { title: '来源边界', render: (_v, t) => (t.sourceStartDate || t.sourceEndDate ? `${t.sourceStartDate ?? '…'} ~ ${t.sourceEndDate ?? '…'}` : '—') },
         { title: '状态', render: (_v, t) => targetStatus(t) },

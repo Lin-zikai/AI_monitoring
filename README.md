@@ -80,7 +80,7 @@ cd server && npm test
 
 ## 已知边界
 
-- 首版数据源仅 Claude Code；其他工具在 `server/src/collect/adapter.ts` 增加适配器，并在远端脚本的 `SOURCES` 中登记。
+- 数据源支持 Claude Code 与 Codex；其他工具在 `server/src/collect/adapter.ts` 增加适配器，并在远端脚本的 `SOURCES` 中登记。
 - 费用是 ccusage 的**估算费用**，不代表订阅实际扣费或官方剩余额度。
 - 不提供实时告警：从用量变化到收到邮件最长约一个采集周期加处理耗时。
 - 多人共用同一账户与目录时只能整体归属到一个平台用户（可标记“共享账户”）。

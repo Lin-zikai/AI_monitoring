@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { supportedSources } from '../../collect/adapter.js';
+import { SOURCE_INFO, supportedSources } from '../../collect/adapter.js';
 import { getGeneralSettings, type GeneralSettings } from '../../settings.js';
 import { addDays, dateInTz, diffDays, monthKey, monthRange, nextSlot } from '../../util/time.js';
 import type { RouteContext } from '../app.js';
@@ -13,6 +13,7 @@ const DIMENSIONS = {
   user: { select: 'd.user_id::text', label: 'u.name' },
   server: { select: 'd.server_id::text', label: 's.name' },
   model: { select: 'd.model', label: 'd.model' },
+  source: { select: 'd.source', label: 'd.source' },
   team: { select: "COALESCE(u.team, '')", label: "COALESCE(u.team, '未分组')" },
 } as const;
 type Dimension = keyof typeof DIMENSIONS;
@@ -28,7 +29,8 @@ const usageQuery = z.object({
   serverId: z.string().uuid().optional(),
   team: z.string().max(100).optional(),
   model: z.string().max(200).optional(),
-  groupBy: z.string().default('date').transform((v) => v.split(',')).pipe(z.array(z.enum(['date', 'user', 'server', 'model', 'team'])).min(1).max(2)),
+  source: z.string().max(32).optional(),
+  groupBy: z.string().default('date').transform((v) => v.split(',')).pipe(z.array(z.enum(['date', 'user', 'server', 'model', 'source', 'team'])).min(1).max(2)),
 });
 
 /** 普通用户只能看到自己的数据：在后台强制把查询范围收窄到本人。 */
@@ -69,7 +71,7 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
 
   app.get('/meta', auth, async (req) => {
     const settings = await getGeneralSettings(db);
-    return { ...(await freshness(scopedUserId(req), settings, new Date())), sources: supportedSources() };
+    return { ...(await freshness(scopedUserId(req), settings, new Date())), sources: supportedSources(), sourceInfo: SOURCE_INFO };
   });
 
   app.get('/stats/filters', auth, async (req) => {
@@ -101,9 +103,9 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
          FROM usage_daily d JOIN users u ON u.id = d.user_id JOIN servers s ON s.id = d.server_id
         WHERE d.usage_date BETWEEN $1 AND $2
           AND ($3::uuid IS NULL OR d.user_id = $3) AND ($4::uuid IS NULL OR d.server_id = $4)
-          AND ($5::text IS NULL OR d.model = $5) AND ($6::text IS NULL OR u.team = $6)
+          AND ($5::text IS NULL OR d.model = $5) AND ($6::text IS NULL OR u.team = $6) AND ($7::text IS NULL OR d.source = $7)
         GROUP BY ${groups.join(', ')} ORDER BY ${dims[0] === 'date' ? 'key0' : '"costUsd" DESC NULLS LAST, key0'}`,
-      [from, to, userId, q.serverId ?? null, q.model ?? null, q.team ?? null],
+      [from, to, userId, q.serverId ?? null, q.model ?? null, q.team ?? null, q.source ?? null],
     );
     return { from, to, groupBy: dims, rows: res.rows };
   });

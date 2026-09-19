@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { costToFixed } from '../util/money.js';
+import { costToFixed, fromMicros, toMicros } from '../util/money.js';
 
 /** 统一统计结构：一行 = 某日某模型。null 表示数据源未提供（未知），不等同于零。 */
 export interface UsageRow {
@@ -107,7 +107,88 @@ export const claudeCodeAdapter: SourceAdapter = {
   },
 };
 
-const adapters = new Map<string, SourceAdapter>([[claudeCodeAdapter.source, claudeCodeAdapter]]);
+// 对照 ccusage@20.0.23 `codex daily --json` 的实际输出核对过的字段：按模型是对象而非数组，费用只有日级 costUSD
+const codexDailyReport = z.object({
+  daily: z.array(z.object({
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    totalTokens: optionalTokens,
+    costUSD: z.number().nullish(),
+    models: z.record(z.string().min(1).max(200), z.object({
+      inputTokens: optionalTokens,
+      outputTokens: optionalTokens,
+      cacheCreationTokens: optionalTokens,
+      cacheReadTokens: optionalTokens,
+      reasoningOutputTokens: optionalTokens,
+      totalTokens: optionalTokens,
+    })).nullish(),
+    inputTokens: optionalTokens,
+    outputTokens: optionalTokens,
+    cacheCreationTokens: optionalTokens,
+    cacheReadTokens: optionalTokens,
+  })),
+});
+
+/** 把日级费用按各模型 Token 占比分摊到行上（定点运算，余数归最大的一行），保证各行之和严格等于当日费用。 */
+function apportionCost(dayCost: string | null, weights: number[]): Array<string | null> {
+  if (dayCost === null) return weights.map(() => null);
+  const total = toMicros(dayCost);
+  const weightSum = weights.reduce((a, b) => a + b, 0);
+  if (weights.length === 1 || weightSum === 0) return weights.map((_, i) => (i === 0 ? fromMicros(total) : '0.000000'));
+  const shares = weights.map((w) => (total * BigInt(w)) / BigInt(weightSum));
+  const largest = weights.indexOf(Math.max(...weights));
+  shares[largest] = shares[largest]! + (total - shares.reduce((a, b) => a + b, 0n));
+  return shares.map(fromMicros);
+}
+
+export const codexAdapter: SourceAdapter = {
+  source: 'codex',
+  parserVersion: 'codex/1',
+  // OpenAI 口径下输入 Token 可能已包含缓存命中部分：总量一律采用 ccusage 给出的 totalTokens，不把各字段自行相加
+  inputIncludesCache: true,
+
+  parse(report: unknown): UsageRow[] {
+    const parsed = codexDailyReport.safeParse(report);
+    if (!parsed.success) {
+      throw new CollectError('PARSE_FAILED', `ccusage codex 输出结构不符合预期: ${parsed.error.issues[0]?.path.join('.')} ${parsed.error.issues[0]?.message}`);
+    }
+    const rows: UsageRow[] = [];
+    const seenDates = new Set<string>();
+    for (const day of parsed.data.daily) {
+      if (seenDates.has(day.date)) throw new CollectError('PARSE_FAILED', `ccusage 输出中日期重复: ${day.date}`);
+      seenDates.add(day.date);
+      const models = Object.entries(day.models ?? {});
+      const dayCost = costToFixed(day.costUSD);
+      if (models.length === 0) {
+        rows.push({
+          date: day.date, model: 'unknown', inputTokens: day.inputTokens ?? null, outputTokens: day.outputTokens ?? null,
+          cacheCreationTokens: day.cacheCreationTokens ?? null, cacheReadTokens: day.cacheReadTokens ?? null, totalTokens: day.totalTokens ?? null, costUsd: dayCost,
+        });
+        continue;
+      }
+      const costs = apportionCost(dayCost, models.map(([, m]) => m.totalTokens ?? 0));
+      let modelTotal: number | null = 0;
+      models.forEach(([name, m], i) => {
+        modelTotal = modelTotal === null || m.totalTokens == null ? null : modelTotal + m.totalTokens;
+        rows.push({
+          date: day.date, model: name, inputTokens: m.inputTokens ?? null, outputTokens: m.outputTokens ?? null,
+          cacheCreationTokens: m.cacheCreationTokens ?? null, cacheReadTokens: m.cacheReadTokens ?? null, totalTokens: m.totalTokens ?? null, costUsd: costs[i]!,
+        });
+      });
+      if (modelTotal !== null && typeof day.totalTokens === 'number' && modelTotal !== day.totalTokens) {
+        throw new CollectError('PARSE_FAILED', `${day.date} 分模型合计 ${modelTotal} 与当日总量 ${day.totalTokens} 不一致`);
+      }
+    }
+    return rows;
+  },
+};
+
+const adapters = new Map<string, SourceAdapter>([[claudeCodeAdapter.source, claudeCodeAdapter], [codexAdapter.source, codexAdapter]]);
+
+/** 各数据源在用户家目录下的默认数据目录名，以及界面上的显示名 */
+export const SOURCE_INFO: Record<string, { label: string; defaultDirName: string }> = {
+  'claude-code': { label: 'Claude Code', defaultDirName: '.claude' },
+  codex: { label: 'Codex', defaultDirName: '.codex' },
+};
 
 export const supportedSources = () => [...adapters.keys()];
 

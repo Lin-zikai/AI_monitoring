@@ -257,7 +257,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
   /** 自动安装采集组件：在远端账户家目录下安装 Node（如缺）、固定版本 ccusage 与采集脚本，并登记采集命令。 */
   app.post('/servers/:id/install-collector', admin, async (req) => {
     const { id } = parse(idParam, req.params);
-    const body = parse(z.object({ mode: z.enum(['auto', 'latest', 'pinned']).default('auto') }), req.body ?? {});
+    const body = parse(z.object({ mode: z.enum(['auto', 'latest', 'pinned']).default('latest') }), req.body ?? {});
     const { ssh } = await loadSshTarget(id);
     try {
       const result = await installCollector(ctx.executor, ssh, { mode: body.mode });

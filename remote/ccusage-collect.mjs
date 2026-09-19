@@ -18,10 +18,14 @@ import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-const COLLECTOR_VERSION = '1.2.0';
+const COLLECTOR_VERSION = '1.3.0';
 const CONFIG_PATH = process.env.CCUSAGE_COLLECT_CONFIG || '/etc/ccusage-collect/config.json';
 const SAFE_PATH = /^\/[A-Za-z0-9._@+\-/]*$/;
-const SOURCES = { 'claude-code': { subcommand: 'claude', dirEnv: 'CLAUDE_CONFIG_DIR', logRoot: 'projects' } };
+// requireLogRoot：Claude 没有 projects/ 时 ccusage 会报错，视为“确实没有用量”；Codex 的记录位置随版本变化（sessions/ 或 sqlite），交给 ccusage 判断
+const SOURCES = {
+  'claude-code': { subcommand: 'claude', dirEnv: 'CLAUDE_CONFIG_DIR', logRoot: 'projects', requireLogRoot: true, extraArgs: (mode) => ['--breakdown', '--order', 'asc', '--mode', mode] },
+  codex: { subcommand: 'codex', dirEnv: 'CODEX_HOME', logRoot: 'sessions', requireLogRoot: false, extraArgs: () => [] },
+};
 
 const echo = {};
 
@@ -124,12 +128,18 @@ async function main() {
 
   // ccusageCommand 形如 ["npx", "--yes", "ccusage@latest"]：首个元素是可执行文件，其余是固定前缀参数
   const command = Array.isArray(config.ccusageCommand) && config.ccusageCommand.every((c) => typeof c === 'string') && config.ccusageCommand.length > 0
-    ? config.ccusageCommand : [config.ccusageBin || 'ccusage'];
-  const [bin, ...prefix] = command;
+    ? [...config.ccusageCommand] : [config.ccusageBin || 'ccusage'];
+  const prefix = command.slice(1);
+  const bin = command[0];
   const childEnv = { PATH: process.env.PATH, HOME: process.env.HOME, NO_COLOR: '1', npm_config_yes: 'true', npm_config_update_notifier: 'false', [source.dirEnv]: realDir };
 
   // 经 npx 运行时首次调用可能要下载新版本，给足时间
-  const version = await run(bin, [...prefix, '--version'], childEnv, prefix.length ? 180000 : 20000);
+  let version = await run(bin, [...prefix, '--version'], childEnv, prefix.length ? 180000 : 20000);
+  if (version.error && prefix.length && config.ccusageBin) {
+    // 取不到最新版（多为 npm 源暂时不可达）：退回本机已安装的 ccusage，保证这一轮能采到
+    command.splice(0, command.length, config.ccusageBin);
+    version = await run(config.ccusageBin, ['--version'], childEnv, 20000);
+  }
   if (version.error) fail('CCUSAGE_MISSING', prefix.length ? '无法通过 npx 获取 ccusage（需要能访问 npm 源）' : '未找到 ccusage，请预装固定版本');
   const ccusageVersion = (/(\d+\.\d+\.\d+\S*)/.exec(version.stdout) ?? [])[1] ?? 'unknown';
   if (config.expectedCcusageVersion && ccusageVersion !== config.expectedCcusageVersion) {
@@ -142,14 +152,14 @@ async function main() {
   const emptyReport = { daily: [] };
 
   // 没有 projects 目录时 ccusage 会报错退出；目录本身可读，属于“确实没有用量”
-  if (!existsSync(logRoot)) finish({ status: 'ok', ...meta, report: emptyReport });
+  if (source.requireLogRoot && !existsSync(logRoot)) finish({ status: 'ok', ...meta, report: emptyReport });
 
   const ccArgs = [
-    source.subcommand, 'daily', '--json', '--breakdown', '--order', 'asc',
+    source.subcommand, 'daily', '--json', ...source.extraArgs(costMode),
     '--since', echo.since.replaceAll('-', ''), '--until', echo.until.replaceAll('-', ''),
-    '--timezone', args.timezone, '--mode', costMode, offline ? '--offline' : '--no-offline',
+    '--timezone', args.timezone, offline ? '--offline' : '--no-offline',
   ];
-  const result = await run(bin, [...prefix, ...ccArgs], childEnv, (config.timeoutSeconds ?? 100) * 1000);
+  const result = await run(command[0], [...command.slice(1), ...ccArgs], childEnv, (config.timeoutSeconds ?? 100) * 1000);
   if (result.error) {
     if (result.error.killed) fail('CCUSAGE_TIMEOUT', 'ccusage 执行超时');
     fail('CCUSAGE_FAILED', `ccusage 执行失败: ${String(result.stderr).slice(0, 300)}`);

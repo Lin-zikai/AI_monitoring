@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { periodsToEvaluate } from '../src/alerts/evaluate.js';
-import { claudeCodeAdapter, CollectError, parseEnvelope } from '../src/collect/adapter.js';
+import { claudeCodeAdapter, codexAdapter, CollectError, parseEnvelope } from '../src/collect/adapter.js';
 import { buildCollectCommand } from '../src/collect/command.js';
 import { computeRange } from '../src/collect/runner.js';
 import { sanitizeError } from '../src/logger.js';
@@ -101,6 +101,25 @@ describe('Claude Code 适配器', () => {
 
   it('结构不符时报 PARSE_FAILED', () => {
     expect(() => claudeCodeAdapter.parse({ days: [] })).toThrow(CollectError);
+  });
+});
+
+describe('Codex 适配器', () => {
+  it('解析 ccusage@20.0.23 codex daily 的真实输出样本；总量取 ccusage 的 totalTokens', () => {
+    const sample = JSON.parse(readFileSync(new URL('./fixtures/ccusage-20.0.23-codex-daily.json', import.meta.url), 'utf8'));
+    const rows = codexAdapter.parse(sample);
+    expect(rows.reduce((a, r) => a + (r.totalTokens ?? 0), 0)).toBe(sample.totals.totalTokens);
+    expect(rows[0]).toMatchObject({ model: 'gpt-5', inputTokens: 496, outputTokens: 258 });
+  });
+
+  it('日级费用按 Token 占比分摊到各模型，各行之和严格等于当日费用', () => {
+    const rows = codexAdapter.parse({ daily: [{ date: '2026-09-19', totalTokens: 3000, costUSD: 1, models: {
+      'gpt-5': { inputTokens: 900, outputTokens: 100, totalTokens: 1000 }, 'gpt-5-codex': { inputTokens: 1500, outputTokens: 500, totalTokens: 2000 } } }] });
+    expect(rows.map((r) => r.costUsd)).toEqual(['0.333333', '0.666667']);
+  });
+
+  it('没有费用时保持未知', () => {
+    expect(codexAdapter.parse({ daily: [{ date: '2026-09-19', models: { m: { totalTokens: 5 } } }] })[0]!.costUsd).toBeNull();
   });
 });
 

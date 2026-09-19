@@ -9,7 +9,7 @@ import { useFetch } from '../hooks';
 import type { Dimension, Filters, UsageResponse, UsageRow } from '../types';
 import { METRIC_OPTIONS } from './Dashboard';
 
-const DIM_LABEL: Record<Dimension, string> = { date: '日期', user: '用户', server: '服务器', model: '模型', team: '团队' };
+const DIM_LABEL: Record<Dimension, string> = { date: '日期', user: '用户', server: '服务器', model: '模型', source: '数据源', team: '团队' };
 const PRESETS = [
   { label: '今天', value: [dayjs(), dayjs()] as [Dayjs, Dayjs] },
   { label: '近 7 天', value: [dayjs().subtract(6, 'day'), dayjs()] as [Dayjs, Dayjs] },
