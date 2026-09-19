@@ -205,6 +205,7 @@ export const collectEnvelope = z.object({
   code: z.string().max(64).optional(),
   message: z.string().max(2000).optional(),
   collectorVersion: z.string().max(32).optional(),
+  home: z.string().max(512).optional(),
   ccusageVersion: z.string().max(32).optional(),
   source: z.string().optional(),
   dir: z.string().optional(),

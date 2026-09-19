@@ -17,6 +17,16 @@ export function parse<S extends z.ZodType>(schema: S, data: unknown): z.infer<S>
   throw new HttpError(400, `参数错误: ${issue?.path.join('.') ?? ''} ${issue?.message ?? ''}`.trim());
 }
 
+/**
+ * 解析 PATCH 请求体：只保留请求里实际出现的字段。
+ * zod 的 .partial() 仍会为缺失字段套用 default()，直接使用会把“没传的字段”悄悄重置成默认值。
+ */
+export function parsePatch<S extends z.ZodType>(schema: S, data: unknown): Partial<z.infer<S>> {
+  const parsed = parse(schema, data) as Record<string, unknown>;
+  const sent = data !== null && typeof data === 'object' ? (data as Record<string, unknown>) : {};
+  return Object.fromEntries(Object.entries(parsed).filter(([key]) => Object.hasOwn(sent, key))) as Partial<z.infer<S>>;
+}
+
 export interface AuthUser { id: string; email: string; name: string; role: 'admin' | 'user' }
 
 declare module 'fastify' {

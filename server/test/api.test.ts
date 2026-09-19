@@ -158,6 +158,37 @@ describe('凭据管理', () => {
   });
 });
 
+describe('一步接入服务器', () => {
+  it('选好用户即可：自动信任指纹、创建 Claude Code 与 Codex 目标并启动首次采集', async () => {
+    const pair = ssh2.utils.generateKeyPairSync('ed25519');
+    const before = enqueued.length;
+    const res = await send('POST', '/api/servers/onboard', adminCookie, { name: 'gpu-new', host: '10.0.0.9', sshUsername: 'alice', userId: zhangsan, privateKey: pair.private });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().steps.map((x: { step: string; ok: boolean }) => [x.step, x.ok])).toEqual([['hostkey', true], ['collector', true], ['targets', true], ['collect', true]]);
+
+    const server = (await get('/api/servers', adminCookie)).json().servers.find((x: { name: string }) => x.name === 'gpu-new');
+    expect(server).toMatchObject({ hostKeyFingerprint: `SHA256:${'A'.repeat(43)}`, defaultUserId: zhangsan, credentialName: 'gpu-new 密钥' });
+    expect(server.targets.map((t: { source: string; dataDir: string; missingOk: boolean; userId: string }) => [t.source, t.dataDir, t.missingOk, t.userId]).sort()).toEqual([
+      ['claude-code', '/home/alice/.claude', true, zhangsan], ['codex', '/home/alice/.codex', true, zhangsan],
+    ]);
+    expect(enqueued.length).toBe(before + 1);
+    expect(enqueued.at(-1)).toHaveLength(2);
+
+    // 再次执行是幂等的：不会重复创建目标
+    expect((await send('POST', `/api/servers/${server.id}/onboard`, adminCookie)).json().ok).toBe(true);
+    expect((await get('/api/servers', adminCookie)).json().servers.find((x: { name: string }) => x.name === 'gpu-new').targets).toHaveLength(2);
+  });
+
+  it('已记录过指纹的服务器，指纹变化时拒绝继续', async () => {
+    const server = (await get('/api/servers', adminCookie)).json().servers.find((x: { name: string }) => x.name === 'gpu-new');
+    await db.query("UPDATE servers SET host_key_fingerprint = 'SHA256:' || repeat('C', 43) WHERE id = $1", [server.id]);
+    const res = (await send('POST', `/api/servers/${server.id}/onboard`, adminCookie)).json();
+    expect(res.ok).toBe(false);
+    expect(res.steps).toEqual([expect.objectContaining({ step: 'hostkey', ok: false })]);
+    await db.query('DELETE FROM servers WHERE id = $1', [server.id]);
+  });
+});
+
 describe('总览仪表盘', () => {
   it('今日排名按 Claude Code / Codex 分列并给出合计；普通用户看不到排名', async () => {
     const day = (await get('/api/meta', adminCookie)).json().today as string;
@@ -194,6 +225,21 @@ describe('管理操作', () => {
     const server = (await get('/api/servers', adminCookie)).json().servers[0].id;
     const badDir = await send('POST', `/api/servers/${server}/targets`, adminCookie, { userId: zhangsan, dataDir: '/home/u/.claude; id' });
     expect(badDir.statusCode).toBe(400);
+  });
+
+  it('只改一个字段的 PATCH 不会把其他字段重置成默认值', async () => {
+    const server = (await get('/api/servers', adminCookie)).json().servers[0];
+    await db.query("UPDATE servers SET port = 8888, collect_command = '/home/u/.local/share/usage-monitor/ccusage-collect' WHERE id = $1", [server.id]);
+    await db.query("UPDATE collection_targets SET ssh_username = 'other', shared_account = true, missing_ok = true WHERE id = $1", [targetId]);
+
+    expect((await send('PATCH', `/api/servers/${server.id}`, adminCookie, { enabled: false })).statusCode).toBe(200);
+    expect((await send('PATCH', `/api/targets/${targetId}`, adminCookie, { enabled: false })).statusCode).toBe(200);
+    const after = (await get('/api/servers', adminCookie)).json().servers.find((x: { id: string }) => x.id === server.id);
+    expect(after).toMatchObject({ port: 8888, collectCommand: '/home/u/.local/share/usage-monitor/ccusage-collect', enabled: false });
+    expect(after.targets.find((t: { id: string }) => t.id === targetId)).toMatchObject({ sshUsername: 'other', sharedAccount: true, missingOk: true, enabled: false });
+
+    await db.query("UPDATE servers SET port = 22, collect_command = 'ccusage-collect', enabled = true WHERE id = $1", [server.id]);
+    await db.query('UPDATE collection_targets SET ssh_username = NULL, shared_account = false, missing_ok = false, enabled = true WHERE id = $1', [targetId]);
   });
 
   it('修改服务器地址后必须重新确认主机指纹', async () => {

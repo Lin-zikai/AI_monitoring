@@ -144,8 +144,15 @@ echo "RESULT $DIR/ccusage-collect $("$NODE_BIN" --version) $VERSION $HOME $CC_MO
 `;
 }
 
+const MANAGED_COMMAND = /^(\/.+)\/\.local\/share\/usage-monitor\/ccusage-collect$/;
+
+/** 远端账户的家目录：优先从自动安装登记的采集命令反推，否则按惯例猜测。 */
+export function guessRemoteHome(collectCommand: string, sshUsername: string): string {
+  return MANAGED_COMMAND.exec(collectCommand)?.[1] ?? (sshUsername === 'root' ? '/root' : `/home/${sshUsername}`);
+}
+
 export interface InstallResult {
-  collectCommand: string; nodeVersion: string; ccusageVersion: string; defaultDataDir: string; log: string;
+  collectCommand: string; nodeVersion: string; ccusageVersion: string; home: string; defaultDataDir: string; log: string;
   /** reused：复用远端已安装的 ccusage；installed：安装了平台专用的固定版本；latest：每次采集经 npx --yes 自动更新 */
   ccusageMode: 'reused' | 'installed' | 'latest';
   ccusagePath: string;
@@ -169,5 +176,5 @@ export async function installCollector(executor: RemoteExecutor, target: SshTarg
   if (!isValidCollectCommand(collectCommand)) throw new CollectError('INSTALL_FAILED', '远端家目录路径包含不支持的字符，无法自动登记采集命令');
   const ccusageMode = mode === 'reused' || mode === 'latest' ? mode : 'installed';
   if (ccusageMode === 'installed' && ccusageVersion !== CCUSAGE_VERSION) throw new CollectError('INSTALL_FAILED', `安装到的 ccusage 版本为 ${ccusageVersion || '未知'}，要求 ${CCUSAGE_VERSION}`);
-  return { collectCommand, nodeVersion, ccusageVersion, defaultDataDir: `${home}/.claude`, log, ccusageMode, ccusagePath, versionMismatch: ccusageVersion !== CCUSAGE_VERSION };
+  return { collectCommand, nodeVersion, ccusageVersion, home, defaultDataDir: `${home}/.claude`, log, ccusageMode, ccusagePath, versionMismatch: ccusageVersion !== CCUSAGE_VERSION };
 }

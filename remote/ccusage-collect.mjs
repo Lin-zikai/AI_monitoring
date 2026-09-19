@@ -18,7 +18,7 @@ import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-const COLLECTOR_VERSION = '1.3.0';
+const COLLECTOR_VERSION = '1.4.0';
 const CONFIG_PATH = process.env.CCUSAGE_COLLECT_CONFIG || '/etc/ccusage-collect/config.json';
 const SAFE_PATH = /^\/[A-Za-z0-9._@+\-/]*$/;
 // requireLogRoot：Claude 没有 projects/ 时 ccusage 会报错，视为“确实没有用量”；Codex 的记录位置随版本变化（sessions/ 或 sqlite），交给 ccusage 判断
@@ -177,5 +177,6 @@ async function main() {
 // 业务错误通过信封传递并以 0 退出；非零退出码保留给脚本自身崩溃
 main().catch((err) => {
   if (!(err instanceof Done)) throw err;
-  process.stdout.write(JSON.stringify({ schema: 1, collectorVersion: COLLECTOR_VERSION, ...echo, ...err.payload }));
+  // home：供平台在一步接入时推断各数据源的默认目录（~/.claude、~/.codex）
+  process.stdout.write(JSON.stringify({ schema: 1, collectorVersion: COLLECTOR_VERSION, home: process.env.HOME, ...echo, ...err.payload }));
 });

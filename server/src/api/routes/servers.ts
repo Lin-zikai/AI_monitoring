@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { CollectError, collectEnvelope, parseEnvelope, supportedSources } from '../../collect/adapter.js';
+import { CollectError, collectEnvelope, parseEnvelope, SOURCE_INFO, supportedSources } from '../../collect/adapter.js';
 import { buildCollectCommand } from '../../collect/command.js';
-import { installCollector } from '../../collect/install.js';
+import { guessRemoteHome, installCollector } from '../../collect/install.js';
 import { createAdhocBatch } from '../../collect/scheduler.js';
 import { withTx } from '../../db/pool.js';
 import { sanitizeError } from '../../logger.js';
@@ -13,7 +13,7 @@ import { getGeneralSettings } from '../../settings.js';
 import { describePrivateKey, type SshTarget } from '../../ssh/client.js';
 import { dateInTz } from '../../util/time.js';
 import type { RouteContext } from '../app.js';
-import { audit, currentUser, HttpError, mapDbError, notFound, parse } from '../http.js';
+import { audit, currentUser, HttpError, mapDbError, notFound, parse, parsePatch } from '../http.js';
 import { idParam } from './users.js';
 
 const dateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
@@ -24,6 +24,21 @@ const credentialSchema = z.object({
   privateKey: z.string().min(50).max(20000),
   passphrase: z.string().max(500).optional(),
 });
+
+/** 一步接入：服务器信息 + 归属用户；密钥可选已有凭据，也可直接给出私钥 */
+const onboardSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  host: z.string().refine(isValidHost, '服务器地址不合法'),
+  port: z.number().int().min(1).max(65535).default(22),
+  sshUsername,
+  userId: z.string().uuid(),
+  credentialId: z.string().uuid().optional(),
+  privateKey: z.string().min(50).max(20000).optional(),
+  passphrase: z.string().max(500).optional(),
+  credentialName: z.string().trim().min(1).max(100).optional(),
+}).refine((b) => Boolean(b.credentialId) !== Boolean(b.privateKey), { message: '请选择已有凭据，或录入新密钥（二选一）', path: ['credentialId'] });
+
+export interface OnboardStep { step: 'hostkey' | 'collector' | 'targets' | 'collect'; ok: boolean; message: string }
 
 const serverSchema = z.object({
   name: z.string().trim().min(1).max(100),
@@ -42,6 +57,8 @@ const targetSchema = z.object({
   sshUsername: sshUsername.nullable().default(null),
   credentialId: z.string().uuid().nullable().default(null),
   sharedAccount: z.boolean().default(false),
+  /** 远端目录不存在时视为“未使用”而不是采集失败 */
+  missingOk: z.boolean().default(false),
   sourceStartDate: dateStr.nullable().default(null),
   sourceEndDate: dateStr.nullable().default(null),
   enabled: z.boolean().default(true),
@@ -136,7 +153,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
     const servers = await db.query(
       `SELECT s.id, s.name, s.host, s.port, s.ssh_username AS "sshUsername", s.credential_id AS "credentialId", c.name AS "credentialName",
               (c.revoked_at IS NOT NULL) AS "credentialRevoked", s.host_key_fingerprint AS "hostKeyFingerprint",
-              s.collect_command AS "collectCommand", s.enabled, s.last_connect_ok_at AS "lastConnectOkAt", s.last_error AS "lastError"
+              s.collect_command AS "collectCommand", s.default_user_id AS "defaultUserId", s.enabled, s.last_connect_ok_at AS "lastConnectOkAt", s.last_error AS "lastError"
          FROM servers s LEFT JOIN credentials c ON c.id = s.credential_id ORDER BY s.name`,
     );
     const targets = await db.query(
@@ -145,7 +162,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
               t.source_start_date AS "sourceStartDate", t.source_end_date AS "sourceEndDate", t.enabled,
               t.initialized_at AS "initializedAt", t.last_attempt_at AS "lastAttemptAt", t.last_success_at AS "lastSuccessAt",
               t.last_status AS "lastStatus", t.last_error_code AS "lastErrorCode", t.last_error AS "lastError",
-              t.consecutive_failures AS "consecutiveFailures",
+              t.consecutive_failures AS "consecutiveFailures", t.missing_ok AS "missingOk",
               (t.lock_run_id IS NOT NULL AND t.lock_expires_at > now()) AS "collecting",
               EXISTS (SELECT 1 FROM usage_daily d WHERE d.target_id = t.id AND d.integrity <> 'complete') AS "hasFlaggedData"
          FROM collection_targets t JOIN users u ON u.id = t.user_id ORDER BY t.data_dir`,
@@ -166,7 +183,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
 
   app.patch('/servers/:id', admin, async (req) => {
     const { id } = parse(idParam, req.params);
-    const body = parse(serverSchema.partial(), req.body);
+    const body = parsePatch(serverSchema.partial(), req.body);
     const before = (await db.query('SELECT host, port FROM servers WHERE id = $1', [id])).rows[0];
     if (!before) throw notFound('服务器');
     // 地址或端口变化后，旧的主机指纹不再可信，必须重新确认
@@ -270,6 +287,131 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
     }
   });
 
+  /**
+   * 一步接入：自动信任首次见到的主机指纹 → 检查采集组件（没有则自动安装）→ 为默认用户创建各数据源的采集目标 → 启动首次采集。
+   * 每一步的结果都返回给界面；任何一步失败，服务器记录保留，修正后可再次调用（幂等）。
+   */
+  async function onboardServer(req: Parameters<typeof audit>[1], serverId: string): Promise<{ ok: boolean; steps: OnboardStep[] }> {
+    const steps: OnboardStep[] = [];
+    const done = (step: OnboardStep['step'], ok: boolean, message: string) => { steps.push({ step, ok, message }); return ok; };
+    const server = (await db.query('SELECT name, host, port, ssh_username, host_key_fingerprint, collect_command, default_user_id FROM servers WHERE id = $1', [serverId])).rows[0];
+    if (!server) throw notFound('服务器');
+    if (!server.default_user_id) throw new HttpError(400, '请先为这台服务器选择归属用户');
+
+    // 1. 主机指纹：首次连接自动信任（等同于 ssh 首次连接时回答 yes）；之后指纹变化仍会被拒绝
+    try {
+      const fingerprint = await ctx.scanHostKey(server.host, server.port);
+      if (!server.host_key_fingerprint) {
+        await db.query('UPDATE servers SET host_key_fingerprint = $2, updated_at = now() WHERE id = $1', [serverId, fingerprint]);
+        await audit(db, req, 'server.trust_host_key', 'server', serverId, { fingerprint, mode: 'trust-on-first-use' });
+        done('hostkey', true, `已记录主机指纹 ${fingerprint}`);
+      } else if (server.host_key_fingerprint !== fingerprint) {
+        done('hostkey', false, `主机指纹与已记录的不一致（现为 ${fingerprint}）。如果服务器确实重装过，请在“更多 → 主机指纹”里重新确认`);
+        return { ok: false, steps };
+      } else done('hostkey', true, '主机指纹与已记录的一致');
+    } catch (err) {
+      done('hostkey', false, `连接不上 ${server.host}:${server.port}：${sanitizeError(err)}`);
+      return { ok: false, steps };
+    }
+
+    // 2. 采集组件：已有就用，没有则经 SSH 自动安装
+    let collectCommand: string = server.collect_command;
+    let reportedHome: string | undefined; // 采集脚本应答里带的家目录（受限密钥的服务器无法从命令路径反推）
+    try {
+      const { ssh } = await loadSshTarget(serverId);
+      const probe = await ctx.executor.exec(ssh, collectCommand, 30_000);
+      let installed = false;
+      try {
+        const envelope = collectEnvelope.safeParse(JSON.parse(probe.stdout));
+        installed = envelope.success;
+        if (envelope.success && envelope.data.home && isSafeAbsolutePath(envelope.data.home)) reportedHome = envelope.data.home;
+      } catch { /* 不是采集脚本的应答 */ }
+      if (installed) done('collector', true, '采集组件已就绪');
+      else {
+        const result = await installCollector(ctx.executor, ssh);
+        collectCommand = result.collectCommand;
+        reportedHome = result.home;
+        await db.query('UPDATE servers SET collect_command = $2, updated_at = now() WHERE id = $1', [serverId, collectCommand]);
+        await audit(db, req, 'server.install_collector', 'server', serverId, { collectCommand, ccusageVersion: result.ccusageVersion, ccusageMode: result.ccusageMode });
+        done('collector', true, `已安装采集组件（ccusage ${result.ccusageVersion}）`);
+      }
+      await db.query('UPDATE servers SET last_connect_ok_at = now(), last_error = NULL WHERE id = $1', [serverId]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message.slice(0, 600) : String(err);
+      await db.query('UPDATE servers SET last_error = $2 WHERE id = $1', [serverId, message.slice(0, 500)]);
+      done('collector', false, message);
+      return { ok: false, steps };
+    }
+
+    // 3. 采集目标：每个数据源一个，目录取该账户家目录下的默认位置；目录不存在视为“未使用”，不算失败
+    const home = reportedHome ?? guessRemoteHome(collectCommand, server.ssh_username);
+    const targetIds = await withTx(db, async (tx) => {
+      const ids: string[] = [];
+      for (const source of supportedSources()) {
+        const dataDir = `${home}/${SOURCE_INFO[source]?.defaultDirName ?? `.${source}`}`;
+        const existing = (await tx.query('SELECT id FROM collection_targets WHERE server_id = $1 AND source = $2', [serverId, source])).rows[0];
+        if (existing) { ids.push(existing.id); continue; }
+        const created = (await tx.query(
+          'INSERT INTO collection_targets (server_id, user_id, source, data_dir, missing_ok) VALUES ($1, $2, $3, $4, true) RETURNING id',
+          [serverId, server.default_user_id, source, dataDir],
+        )).rows[0];
+        await tx.query("INSERT INTO target_user_bindings (target_id, user_id, effective_from) VALUES ($1, $2, '1970-01-01')", [created.id, server.default_user_id]);
+        ids.push(created.id);
+      }
+      return ids;
+    });
+    done('targets', true, `采集 ${supportedSources().map((src) => SOURCE_INFO[src]?.label ?? src).join('、')}（目录位于 ${home}）`);
+
+    // 4. 首次采集
+    const idle = (await db.query(
+      'SELECT id FROM collection_targets WHERE id = ANY($1::uuid[]) AND enabled AND NOT (lock_run_id IS NOT NULL AND lock_expires_at > now())', [targetIds],
+    )).rows.map((r) => r.id as string);
+    if (idle.length > 0) {
+      const batch = await createAdhocBatch(db, 'init', idle, currentUser(req).id);
+      await ctx.queues.enqueueRuns(batch.runIds);
+    }
+    done('collect', true, '首次采集已开始，稍后刷新即可看到数据');
+    return { ok: true, steps };
+  }
+
+  app.post('/servers/onboard', admin, async (req, reply) => {
+    const body = parse(onboardSchema, req.body);
+    let credentialId = body.credentialId;
+    let prepared: ReturnType<typeof sealKey> | undefined;
+    if (body.privateKey) {
+      credentialId = randomUUID();
+      try {
+        prepared = sealKey(credentialId, body.privateKey, body.passphrase);
+      } catch (err) {
+        throw new HttpError(400, sanitizeError(err));
+      }
+    }
+    // 凭据与服务器同事务创建：名称冲突等错误不会留下半截数据
+    const serverId = await withTx(db, async (tx) => {
+      if (prepared) {
+        await tx.query(
+          'INSERT INTO credentials (id, name, ciphertext, iv, auth_tag, key_version, public_fingerprint, key_type) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+          [credentialId, body.credentialName ?? `${body.name} 密钥`, prepared.sealed.ciphertext, prepared.sealed.iv, prepared.sealed.authTag, config.masterKeyVersion, prepared.info.fingerprint, prepared.info.keyType],
+        );
+      }
+      const res = await tx.query(
+        'INSERT INTO servers (name, host, port, ssh_username, credential_id, default_user_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+        [body.name, body.host, body.port, body.sshUsername, credentialId, body.userId],
+      );
+      return res.rows[0].id as string;
+    }).catch(mapDbError);
+    await audit(db, req, 'server.create', 'server', serverId, { name: body.name, host: body.host, port: body.port, userId: body.userId, newCredential: Boolean(prepared) });
+    return reply.status(201).send({ id: serverId, ...(await onboardServer(req, serverId)) });
+  });
+
+  /** 重新执行接入流程（修正问题后重试，或给旧服务器补上默认采集目标） */
+  app.post('/servers/:id/onboard', admin, async (req) => {
+    const { id } = parse(idParam, req.params);
+    const body = parse(z.object({ userId: z.string().uuid().optional() }), req.body ?? {});
+    if (body.userId) await db.query('UPDATE servers SET default_user_id = $2 WHERE id = $1', [id, body.userId]).catch(mapDbError);
+    return { id, ...(await onboardServer(req, id)) };
+  });
+
   // ---- 采集目标 ----
 
   app.post('/servers/:id/targets', admin, async (req, reply) => {
@@ -277,9 +419,9 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
     const body = parse(targetSchema, req.body);
     const targetId = await withTx(db, async (tx) => {
       const res = await tx.query(
-        `INSERT INTO collection_targets (server_id, user_id, source, data_dir, ssh_username, credential_id, shared_account, source_start_date, source_end_date, enabled)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
-        [serverId, body.userId, body.source, body.dataDir, body.sshUsername, body.credentialId, body.sharedAccount, body.sourceStartDate, body.sourceEndDate, body.enabled],
+        `INSERT INTO collection_targets (server_id, user_id, source, data_dir, ssh_username, credential_id, shared_account, source_start_date, source_end_date, enabled, missing_ok)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
+        [serverId, body.userId, body.source, body.dataDir, body.sshUsername, body.credentialId, body.sharedAccount, body.sourceStartDate, body.sourceEndDate, body.enabled, body.missingOk],
       );
       await tx.query("INSERT INTO target_user_bindings (target_id, user_id, effective_from) VALUES ($1, $2, '1970-01-01')", [res.rows[0].id, body.userId]);
       return res.rows[0].id as string;
@@ -290,7 +432,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
 
   app.patch('/targets/:id', admin, async (req) => {
     const { id } = parse(idParam, req.params);
-    const body = parse(targetPatchSchema, req.body);
+    const body = parsePatch(targetPatchSchema, req.body);
     const has = (k: keyof typeof body) => Object.hasOwn(body, k);
     const res = await db.query(
       `UPDATE collection_targets SET
@@ -300,10 +442,10 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
               shared_account = COALESCE($8, shared_account),
               source_start_date = CASE WHEN $9 THEN $10::date ELSE source_start_date END,
               source_end_date = CASE WHEN $11 THEN $12::date ELSE source_end_date END,
-              enabled = COALESCE($13, enabled), updated_at = now()
+              enabled = COALESCE($13, enabled), missing_ok = COALESCE($14, missing_ok), updated_at = now()
         WHERE id = $1`,
       [id, has('dataDir'), body.dataDir ?? null, has('sshUsername'), body.sshUsername ?? null, has('credentialId'), body.credentialId ?? null,
-        body.sharedAccount ?? null, has('sourceStartDate'), body.sourceStartDate ?? null, has('sourceEndDate'), body.sourceEndDate ?? null, body.enabled ?? null],
+        body.sharedAccount ?? null, has('sourceStartDate'), body.sourceStartDate ?? null, has('sourceEndDate'), body.sourceEndDate ?? null, body.enabled ?? null, body.missingOk ?? null],
     ).catch(mapDbError);
     if (res.rowCount === 0) throw notFound('采集目标');
     await audit(db, req, 'target.update', 'target', id, body);

@@ -32,7 +32,7 @@ docker compose logs -f api collector mailer
 
 | | 自动安装（省事） | 手工安装受限账户（更安全，方案推荐） |
 | --- | --- | --- |
-| 做法 | 平台上添加服务器 → 确认指纹 → “测试连接”提示未安装时点“自动安装”（或“更多 → 安装 / 更新采集组件”） | 按下文用 root 执行 `remote/install.sh` |
+| 做法 | 平台上“添加服务器”并选好归属用户即可，其余全部自动（记录指纹、安装采集组件、创建 Claude Code / Codex 目标、首次采集）；失败后修正问题，点“更多 → 重新接入” | 按下文用 root 执行 `remote/install.sh` |
 | 前提 | 该 SSH 密钥在远端有普通 shell 权限；远端能访问外网（nodejs.org / npm 源，或其国内镜像） | root 权限 |
 | 装到哪里 | 该账户的 `~/.local/share/usage-monitor/`：采集脚本与配置（几百 KB）。远端已有的 Node.js 直接复用；缺少时才下载（校验 SHA256，约 100 MB） | `/usr/local/bin`、`/etc/ccusage-collect` |
 | 密钥权限 | 密钥本身能登录 shell——密钥泄露等同于该账户泄露，建议仍使用专用账户与专用密钥 | 密钥被 `command="…",restrict` 锁定，只能运行采集脚本 |
@@ -40,6 +40,8 @@ docker compose logs -f api collector mailer
 自动安装后 ccusage **始终使用最新版**：每次采集都通过 `npx --yes ccusage@latest` 运行，有新版本时自动确认更新后再取数。远端已装过的 ccusage 不会被改动，只在取不到最新版（npm 源不可达）时作为后备；两者都没有时才装一份固定版本。不锁版本号，但平台会对每次结果做结构与合计校验（新版改了输出格式会失败并保留旧数据，而不是入库错误数据），并把 ccusage 版本随每行统计记录在 `price_version`。接口 `POST /api/servers/:id/install-collector` 仍接受 `{"mode": "auto" | "pinned"}`，用于需要复用已装版本或固定版本的场合。
 
 数据源：Claude Code（默认目录 `~/.claude`）与 Codex（默认目录 `~/.codex`）。添加采集目标时可同时勾选，每个数据源各建一个目标。Codex 的总量采用 ccusage 给出的 `totalTokens`（OpenAI 口径下输入可能已含缓存命中，不自行相加）；ccusage 只给出 Codex 的日级费用，平台按各模型 Token 占比分摊到模型行，日合计保持精确。
+
+主机指纹采用“首次连接自动信任”：第一次接入时记录指纹并写入审计日志，之后每次采集都会核对，不一致即拒绝连接（`HOST_KEY_MISMATCH`）；服务器确实重装过时，在“更多 → 主机指纹”里重新确认。对安全要求高的服务器，可在接入后用 `ssh-keygen -lf /etc/ssh/ssh_host_*_key.pub` 核对平台记录的指纹。
 
 下面是手工安装的步骤。
 

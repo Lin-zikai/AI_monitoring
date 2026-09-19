@@ -35,7 +35,7 @@ export type RunOutcome =
 
 interface RunContext {
   run_id: string; trigger: string; run_status: string; reconcile: boolean | null;
-  target_id: string; user_id: string; server_id: string; source: string; data_dir: string; target_enabled: boolean;
+  target_id: string; user_id: string; server_id: string; source: string; data_dir: string; target_enabled: boolean; missing_ok: boolean;
   source_start_date: string | null; source_end_date: string | null;
   initialized_at: Date | null; last_success_at: Date | null;
   host: string; port: number; collect_command: string; host_key_fingerprint: string | null; server_enabled: boolean;
@@ -68,7 +68,7 @@ export function computeRange(ctx: Pick<RunContext, 'initialized_at' | 'last_succ
 async function loadContext(db: Db, runId: string): Promise<RunContext | undefined> {
   const res = await db.query<RunContext>(
     `SELECT r.id AS run_id, r.trigger, r.status AS run_status, b.reconcile,
-            t.id AS target_id, t.user_id, t.server_id, t.source, t.data_dir, t.enabled AS target_enabled,
+            t.id AS target_id, t.user_id, t.server_id, t.source, t.data_dir, t.enabled AS target_enabled, t.missing_ok,
             t.source_start_date, t.source_end_date, t.initialized_at, t.last_success_at,
             s.host, s.port, s.collect_command, s.host_key_fingerprint, s.enabled AS server_enabled,
             COALESCE(t.ssh_username, s.ssh_username) AS ssh_username,
@@ -122,6 +122,8 @@ export async function runCollection(deps: RunnerDeps, runId: string, opts: RunOp
     const adapter = getAdapter(ctx.source);
     const range = computeRange(ctx, settings, now());
     const isBackfill = !ctx.initialized_at;
+    // 自动创建的目标：远端目录不存在 = 该用户还没用过这个工具。不算失败，也不标记“已初始化”，目录出现后仍会回填历史
+    let dirMissing = false;
     let rows: ReturnType<typeof adapter.parse> = [];
     let meta = { ccusageVersion: null as string | null, costMode: null as string | null, priceVersion: null as string | null };
 
@@ -129,21 +131,26 @@ export async function runCollection(deps: RunnerDeps, runId: string, opts: RunOp
       const req: CollectRequest = { source: ctx.source, dir: ctx.data_dir, since: range.since, until: range.until, timezone: settings.timezone };
       const command = buildCollectCommand(ctx.collect_command, req);
       const secret = JSON.parse(unseal(deps.masterKey, { ciphertext: ctx.ciphertext, iv: ctx.iv, authTag: ctx.auth_tag }, `credential:${ctx.credential_id}`)) as { privateKey: string; passphrase?: string };
-      const result = await deps.executor.exec(
-        { host: ctx.host, port: ctx.port, username: ctx.ssh_username, privateKey: secret.privateKey, passphrase: secret.passphrase, expectedHostFingerprint: ctx.host_key_fingerprint },
-        command, deps.sshTimeoutMs,
-      );
-      if (result.exitCode !== 0 && result.stdout.trim() === '') {
-        throw new CollectError('REMOTE_EXEC_FAILED', `远端命令退出码 ${result.exitCode}: ${result.stderr.slice(0, 200)}`, true);
+      try {
+        const result = await deps.executor.exec(
+          { host: ctx.host, port: ctx.port, username: ctx.ssh_username, privateKey: secret.privateKey, passphrase: secret.passphrase, expectedHostFingerprint: ctx.host_key_fingerprint },
+          command, deps.sshTimeoutMs,
+        );
+        if (result.exitCode !== 0 && result.stdout.trim() === '') {
+          throw new CollectError('REMOTE_EXEC_FAILED', `远端命令退出码 ${result.exitCode}: ${result.stderr.slice(0, 200)}`, true);
+        }
+        const envelope = parseEnvelope(result.stdout, req);
+        rows = adapter.parse(envelope.report);
+        const version = envelope.ccusageVersion ?? null;
+        meta = {
+          ccusageVersion: version,
+          costMode: envelope.costMode ?? null,
+          priceVersion: version ? `ccusage@${version}/${envelope.offline === false ? 'live' : 'offline'}` : null,
+        };
+      } catch (err) {
+        if (!(ctx.missing_ok && err instanceof CollectError && err.code === 'DIR_MISSING')) throw err;
+        dirMissing = true;
       }
-      const envelope = parseEnvelope(result.stdout, req);
-      rows = adapter.parse(envelope.report);
-      const version = envelope.ccusageVersion ?? null;
-      meta = {
-        ccusageVersion: version,
-        costMode: envelope.costMode ?? null,
-        priceVersion: version ? `ccusage@${version}/${envelope.offline === false ? 'live' : 'offline'}` : null,
-      };
     }
 
     // 只有完整、校验成功的结果才走到这里；入库、状态更新与告警在同一事务内完成
@@ -152,7 +159,7 @@ export async function runCollection(deps: RunnerDeps, runId: string, opts: RunOp
       if (held.rowCount === 0) return null; // 租约已被更新的运行接管：放弃旧结果，避免覆盖新结果
 
       const collectedAt = now();
-      const ingest = range
+      const ingest = range && !dirMissing
         ? await ingestSnapshot(tx, {
           targetId: ctx.target_id, serverId: ctx.server_id, source: ctx.source, runId, since: range.since, until: range.until, rows,
           timezone: settings.timezone, costMode: meta.costMode, priceVersion: meta.priceVersion, parserVersion: adapter.parserVersion,
@@ -162,16 +169,16 @@ export async function runCollection(deps: RunnerDeps, runId: string, opts: RunOp
 
       await tx.query(
         `UPDATE collection_targets
-            SET last_success_at = $2, last_status = 'success', last_error = NULL, last_error_code = NULL,
-                consecutive_failures = 0, failure_streak_id = NULL, initialized_at = COALESCE(initialized_at, $2),
+            SET last_success_at = $2, last_status = 'success', last_error = NULL, last_error_code = CASE WHEN $3 THEN 'NO_DATA_DIR' END,
+                consecutive_failures = 0, failure_streak_id = NULL, initialized_at = CASE WHEN $3 THEN initialized_at ELSE COALESCE(initialized_at, $2) END,
                 lock_run_id = NULL, lock_expires_at = NULL, updated_at = $2
           WHERE id = $1`,
-        [ctx.target_id, collectedAt],
+        [ctx.target_id, collectedAt, dirMissing],
       );
       await tx.query('UPDATE servers SET last_connect_ok_at = $2, last_error = NULL WHERE id = $1', [ctx.server_id, collectedAt]);
 
       // 除了本次数据有变化的用户，始终评估目标当前绑定的用户：新建规则或预算调整后无需等到用量变化才生效
-      const alertsCreated = range
+      const alertsCreated = range && !dirMissing
         ? await evaluateUsageAlerts(tx, {
           userIds: [...new Set([...ingest.userIds, ctx.user_id])], touchedSince: range.since, today: dateInTz(collectedAt, settings.timezone), now: collectedAt,
           isBackfill, settings, runId, baseUrl: deps.baseUrl,

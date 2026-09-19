@@ -97,6 +97,20 @@ describe('失败、空结果与数据完整性', () => {
     expect((await db.query('SELECT usage_date, total_tokens FROM usage_daily')).rows).toEqual([{ usage_date: '2026-09-18', total_tokens: 100 }]);
   });
 
+  it('自动创建的目标：目录不存在视为“未使用”，不算失败也不告警；目录出现后仍回填历史', async () => {
+    await db.query('UPDATE collection_targets SET missing_ok = true WHERE id = $1', [targetA]);
+    const missing = fakeExecutor(() => { throw remoteError('DIR_MISSING', '数据目录不存在'); });
+    for (const t of ['2026-09-19 10:00', '2026-09-19 12:00', '2026-09-19 14:00']) expect((await collect(db, missing, targetA, at(t))).status).toBe('success');
+    const t = (await db.query('SELECT last_status, last_error_code, consecutive_failures, initialized_at FROM collection_targets WHERE id = $1', [targetA])).rows[0];
+    expect(t).toEqual({ last_status: 'success', last_error_code: 'NO_DATA_DIR', consecutive_failures: 0, initialized_at: null });
+    expect(await outbox(db)).toHaveLength(0);
+
+    const appeared = fakeExecutor(() => report({ '2026-08-01': [opus(100, 0.1)], '2026-09-19': [opus(50, 0.05)] }));
+    await collect(db, appeared, targetA, at('2026-09-19 16:00'));
+    expect(appeared.calls[0]!.since).toBe('2026-06-21'); // 仍按首次接入回填
+    expect((await userTotals(db, zhangsan, '2026-01-01', '2026-12-31')).tokens).toBe(150);
+  });
+
   it('断连恢复后补齐缺失统计', async () => {
     await collect(db, fakeExecutor(() => report({ '2026-09-05': [opus(100, 0.1)] })), targetA, at('2026-09-05 10:00'));
     const offline = fakeExecutor(() => { throw remoteError('CONNECT_TIMEOUT', 'SSH 连接超时', true); });

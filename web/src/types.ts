@@ -94,12 +94,12 @@ export interface Target {
   id: string; serverId: string; userId: string; userName: string; source: string; dataDir: string;
   sshUsername: string | null; credentialId: string | null; sharedAccount: boolean; sourceStartDate: string | null; sourceEndDate: string | null;
   enabled: boolean; initializedAt: string | null; lastAttemptAt: string | null; lastSuccessAt: string | null; lastStatus: string | null;
-  lastErrorCode: string | null; lastError: string | null; consecutiveFailures: number; collecting: boolean; hasFlaggedData: boolean;
+  lastErrorCode: string | null; lastError: string | null; consecutiveFailures: number; missingOk: boolean; collecting: boolean; hasFlaggedData: boolean;
 }
 
 export interface Server {
   id: string; name: string; host: string; port: number; sshUsername: string; credentialId: string | null; credentialName: string | null;
-  credentialRevoked: boolean; hostKeyFingerprint: string | null; collectCommand: string; enabled: boolean;
+  credentialRevoked: boolean; hostKeyFingerprint: string | null; collectCommand: string; defaultUserId: string | null; enabled: boolean;
   lastConnectOkAt: string | null; lastError: string | null; targets: Target[];
 }
 

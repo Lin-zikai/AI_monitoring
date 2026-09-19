@@ -188,21 +188,57 @@ function CredentialsTab({ credentials, loading, reload }: { credentials: Credent
 
 interface ServerForm { name: string; host: string; port: number; sshUsername: string; credentialId: string; collectCommand: string; enabled: boolean }
 
-type ServerFormValues = ServerForm & { credentialName?: string; privateKey?: string; passphrase?: string };
+type ServerFormValues = ServerForm & { userId?: string; credentialName?: string; privateKey?: string; passphrase?: string };
 
-function ServerModal({ editing, credentials, onClose, onSaved, onCredentialCreated }: { editing: Server | 'new' | null; credentials: Credential[]; onClose: () => void; onSaved: () => void; onCredentialCreated: () => void }) {
+interface OnboardResult { id: string; ok: boolean; steps: Array<{ step: string; ok: boolean; message: string }> }
+const STEP_LABEL: Record<string, string> = { hostkey: '主机指纹', collector: '采集组件', targets: '采集目标', collect: '首次采集' };
+
+function ServerModal({ editing, credentials, users, onClose, onSaved, onCredentialCreated }: { editing: Server | 'new' | null; credentials: Credential[]; users: Filters['users']; onClose: () => void; onSaved: () => void; onCredentialCreated: () => void }) {
   const [form] = Form.useForm<ServerFormValues>();
   const [saving, setSaving] = useState(false);
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
 
   // 凭据来源：选已有的，或直接在这里录入新密钥（先创建凭据，再创建/更新服务器）
   const [credMode, setCredMode] = useState<'existing' | 'new'>('existing');
   const usable = credentials.filter((c) => !c.revokedAt);
 
+  const showOnboardResult = (name: string, r: OnboardResult) => (r.ok ? modal.success : modal.warning)({
+    title: r.ok ? `“${name}”已接入，首次采集已开始` : `“${name}”已保存，但接入没有完成`, width: 600,
+    content: (
+      <div>
+        {r.steps.map((st) => (
+          <Paragraph key={st.step} style={{ marginBottom: 6 }}>
+            <Tag color={st.ok ? 'success' : 'error'}>{STEP_LABEL[st.step] ?? st.step}</Tag><span style={{ whiteSpace: 'pre-wrap' }}>{st.message}</span>
+          </Paragraph>
+        ))}
+        <Paragraph type="secondary" style={{ marginBottom: 0, marginTop: 8 }}>
+          {r.ok ? '之后每 2 小时自动采集。某个工具的目录在远端不存在时会显示“未使用”，不算失败。' : '解决问题后，在该服务器的“更多 → 重新接入”里重试即可，不需要重新填写。'}
+        </Paragraph>
+      </div>
+    ),
+  });
+
   const submit = async () => {
     const v = await form.validateFields();
     setSaving(true);
     try {
+      if (editing === 'new') {
+        // 一步接入：后台自动信任指纹、检查/安装采集组件、创建 Claude Code 与 Codex 目标并启动首次采集
+        const progress = modal.info({ title: `正在接入 ${v.name}…`, content: '连接服务器、检查采集组件（没有则自动安装）并启动首次采集，通常需要几秒到几分钟，请不要关闭页面。', okButtonProps: { loading: true, disabled: true }, okText: '进行中', keyboard: false, maskClosable: false });
+        try {
+          const r = await api.post<OnboardResult>('/servers/onboard', {
+            name: v.name, host: v.host, port: v.port, sshUsername: v.sshUsername, userId: v.userId,
+            ...(credMode === 'new'
+              ? { privateKey: v.privateKey, ...(v.passphrase ? { passphrase: v.passphrase } : {}), ...(v.credentialName?.trim() ? { credentialName: v.credentialName.trim() } : {}) }
+              : { credentialId: v.credentialId }),
+          });
+          progress.destroy();
+          form.resetFields(); // 私钥不在界面留存
+          onClose(); onSaved(); onCredentialCreated();
+          showOnboardResult(v.name, r);
+        } catch (err) { progress.destroy(); throw err; }
+        return;
+      }
       let credentialId = v.credentialId;
       if (credMode === 'new') {
         const created = await api.post<{ id: string; publicFingerprint: string }>('/credentials', {
@@ -215,13 +251,9 @@ function ServerModal({ editing, credentials, onClose, onSaved, onCredentialCreat
         onCredentialCreated();
         message.success(`密钥已加密保存，公钥指纹 ${created.publicFingerprint}`);
       }
-      const body = { name: v.name, host: v.host, port: v.port, sshUsername: v.sshUsername, credentialId, collectCommand: v.collectCommand, enabled: v.enabled };
-      if (editing === 'new') {
-        await api.post('/servers', body);
-        message.success('服务器已添加，请继续“扫描并确认主机指纹”');
-      } else if (editing) {
-        const res = await api.patch<{ hostKeyReset: boolean }>(`/servers/${editing.id}`, body);
-        if (res.hostKeyReset) message.warning('地址或端口已变更，原主机指纹已作废，请重新扫描并确认');
+      if (editing) {
+        const res = await api.patch<{ hostKeyReset: boolean }>(`/servers/${editing.id}`, { name: v.name, host: v.host, port: v.port, sshUsername: v.sshUsername, credentialId, collectCommand: v.collectCommand, enabled: v.enabled });
+        if (res.hostKeyReset) message.warning('地址或端口已变更，原主机指纹已作废；请在“更多 → 重新接入”里重新记录');
         else message.success('已保存');
       }
       onClose();
@@ -246,7 +278,13 @@ function ServerModal({ editing, credentials, onClose, onSaved, onCredentialCreat
           <Form.Item name="host" label="服务器地址" rules={[{ required: true, message: '请输入主机名或 IP' }]} style={{ width: 300 }}><Input placeholder="10.0.0.12 或 host.example.com" /></Form.Item>
           <Form.Item name="port" label="SSH 端口" rules={[{ required: true }]}><InputNumber min={1} max={65535} precision={0} /></Form.Item>
         </Space>
-        <Form.Item name="sshUsername" label="SSH 登录用户名（建议专用采集账户）" rules={[{ required: true, message: '请输入用户名' }]}><Input maxLength={32} placeholder="collector" /></Form.Item>
+        {editing === 'new' && (
+          <Form.Item name="userId" label="归属用户" rules={[{ required: true, message: '请选择这台服务器上的用量归属给谁' }]}
+            extra="该 SSH 账户下的 Claude Code 与 Codex 用量都会记到这个人名下。还没有这个人？先到“用户列表”新增。">
+            <Select showSearch optionFilterProp="label" placeholder="选择用户" options={users.map((u) => ({ value: u.id, label: u.team ? `${u.name}（${u.team}）` : u.name }))} />
+          </Form.Item>
+        )}
+        <Form.Item name="sshUsername" label="SSH 登录用户名" rules={[{ required: true, message: '请输入用户名' }]}><Input maxLength={32} placeholder="collector" /></Form.Item>
         <Form.Item label="SSH 密钥" required style={{ marginBottom: 8 }}>
           <Radio.Group value={credMode} onChange={(e) => setCredMode(e.target.value)} optionType="button" buttonStyle="solid" size="small"
             options={[{ value: 'new', label: '录入新密钥' }, { value: 'existing', label: `选择已有凭据（${usable.length}）`, disabled: usable.length === 0 }]} />
@@ -267,10 +305,14 @@ function ServerModal({ editing, credentials, onClose, onSaved, onCredentialCreat
             </Space>
           </>
         )}
-        <Form.Item name="collectCommand" label="远端采集命令" tooltip="预装在服务器上的受限采集脚本：命令名或绝对路径。平台只会以白名单参数调用它，不会执行其他命令。" rules={[{ required: true }]}>
-          <Input placeholder="ccusage-collect" />
-        </Form.Item>
-        <Form.Item name="enabled" label="启用采集" valuePropName="checked"><Switch /></Form.Item>
+        {editing !== 'new' && (
+          <>
+            <Form.Item name="collectCommand" label="远端采集命令" tooltip="预装在服务器上的受限采集脚本：命令名或绝对路径。平台只会以白名单参数调用它，不会执行其他命令。" rules={[{ required: true }]}>
+              <Input placeholder="ccusage-collect" />
+            </Form.Item>
+            <Form.Item name="enabled" label="启用采集" valuePropName="checked"><Switch /></Form.Item>
+          </>
+        )}
       </Form>
     </Modal>
   );
@@ -329,7 +371,7 @@ function HostKeyModal({ server, onClose, onSaved }: { server: Server | null; onC
 // ---------------------------------------------------------------- 采集目标
 
 interface TargetForm {
-  userId: string; source: string; dataDir: string; sources?: string[]; dirs?: Record<string, string>; sshUsername?: string; credentialId?: string; sharedAccount: boolean;
+  userId: string; source: string; dataDir: string; missingOk: boolean; sources?: string[]; dirs?: Record<string, string>; sshUsername?: string; credentialId?: string; sharedAccount: boolean;
   sourceStartDate?: Dayjs | null; sourceEndDate?: Dayjs | null; enabled: boolean;
 }
 
@@ -345,7 +387,7 @@ function TargetModal({ state, credentials, users, sources, onClose, onSaved }: {
     if (!state) return;
     const v = await form.validateFields();
     const common = {
-      sshUsername: v.sshUsername?.trim() || null, credentialId: v.credentialId ?? null, sharedAccount: v.sharedAccount,
+      sshUsername: v.sshUsername?.trim() || null, credentialId: v.credentialId ?? null, sharedAccount: v.sharedAccount, missingOk: v.missingOk,
       sourceStartDate: v.sourceStartDate ? v.sourceStartDate.format('YYYY-MM-DD') : null, sourceEndDate: v.sourceEndDate ? v.sourceEndDate.format('YYYY-MM-DD') : null, enabled: v.enabled,
     };
     setSaving(true);
@@ -375,12 +417,12 @@ function TargetModal({ state, credentials, users, sources, onClose, onSaved }: {
   const initial: Partial<TargetForm> = target
     ? {
       userId: target.userId, source: target.source, dataDir: target.dataDir, sshUsername: target.sshUsername ?? undefined, credentialId: target.credentialId ?? undefined,
-      sharedAccount: target.sharedAccount, sourceStartDate: target.sourceStartDate ? dayjs(target.sourceStartDate) : null,
+      sharedAccount: target.sharedAccount, missingOk: target.missingOk, sourceStartDate: target.sourceStartDate ? dayjs(target.sourceStartDate) : null,
       sourceEndDate: target.sourceEndDate ? dayjs(target.sourceEndDate) : null, enabled: target.enabled,
     }
     : {
       sources: available, dirs: Object.fromEntries(available.map((src) => [src, `${home}/${SOURCE_META[src]?.dir ?? `.${src}`}`])),
-      sharedAccount: false, enabled: true,
+      sharedAccount: false, missingOk: true, enabled: true,
     };
 
   return (
@@ -412,6 +454,9 @@ function TargetModal({ state, credentials, users, sources, onClose, onSaved }: {
             ))}
           </>
         )}
+        <Form.Item name="missingOk" valuePropName="checked" style={{ marginBottom: 8 }} extra="该账户还没用过这个工具时，远端不会有对应目录。勾选后这种情况显示为“未使用”，不算采集失败、不发告警。">
+          <Checkbox>目录不存在时不算失败</Checkbox>
+        </Form.Item>
         <Form.Item name="sharedAccount" valuePropName="checked" extra="多人共用同一账户和目录且记录无可靠身份字段时勾选：用量只能整体归属为共享账户。">
           <Checkbox>这是一个共享账户 / 共享目录</Checkbox>
         </Form.Item>
@@ -555,6 +600,7 @@ function targetStatus(t: Target) {
   if (t.collecting) return <Badge status="processing" text="采集中" />;
   if (!t.enabled) return <Badge status="default" text="已停用" />;
   if (t.lastStatus === 'failed') return <Tooltip title={t.lastError}><Badge status="error" text={`失败 ×${t.consecutiveFailures}${t.lastErrorCode ? ` · ${t.lastErrorCode}` : ''}`} /></Tooltip>;
+  if (t.lastErrorCode === 'NO_DATA_DIR') return <Tooltip title="远端还没有这个目录：该账户尚未使用此工具。不算采集失败；目录出现后会自动开始采集并回填历史。"><Badge status="default" text="未使用" /></Tooltip>;
   if (!t.initializedAt) return <Badge status="warning" text="待初始化" />;
   return <Badge status="success" text="正常" />;
 }
@@ -612,6 +658,18 @@ export function ServersPage() {
         });
       } else modal.error({ title: '未成功', width: 640, content: <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12, margin: 0 }}>{`${r.code ? `${r.code}：` : ''}${r.message ?? ''}`}</pre> });
       servers.reload();
+    } catch (err) { progress.destroy(); message.error(errorMessage(err)); }
+  };
+
+  /** 重新执行一步接入（修正问题后重试，或给早先添加的服务器补上默认采集目标） */
+  const reOnboard = async (s: Server) => {
+    if (!s.defaultUserId && s.targets.length === 0) return void message.warning('这台服务器还没有归属用户：请先“添加采集目标”，或删除后重新添加');
+    const progress = modal.info({ title: `正在重新接入 ${s.name}…`, content: '通常需要几秒到几分钟，请不要关闭页面。', okButtonProps: { loading: true, disabled: true }, okText: '进行中', keyboard: false, maskClosable: false });
+    try {
+      const r = await api.post<OnboardResult>(`/servers/${s.id}/onboard`, s.defaultUserId ? {} : { userId: s.targets[0]!.userId });
+      progress.destroy();
+      (r.ok ? modal.success : modal.warning)({ title: r.ok ? '接入完成，采集已开始' : '接入没有完成', width: 600, content: <div>{r.steps.map((st) => <Paragraph key={st.step} style={{ marginBottom: 6 }}><Tag color={st.ok ? 'success' : 'error'}>{STEP_LABEL[st.step] ?? st.step}</Tag>{st.message}</Paragraph>)}</div> });
+      reload();
     } catch (err) { progress.destroy(); message.error(errorMessage(err)); }
   };
 
@@ -715,6 +773,7 @@ export function ServersPage() {
               <Dropdown menu={{
                 items: [
                   { key: 'hostkey', label: '主机指纹', onClick: () => setHostKeyFor(s) },
+                  { key: 'onboard', label: '重新接入', onClick: () => void reOnboard(s) },
                   { key: 'install', label: '安装 / 更新采集组件', disabled: !s.hostKeyFingerprint, onClick: () => askInstall(s, `在“${s.name}”上安装 / 更新采集组件`) },
                   { key: 'toggle', label: s.enabled ? '停用' : '启用', onClick: () => void toggle('servers', s.id, !s.enabled) },
                   { type: 'divider' },
@@ -750,7 +809,7 @@ export function ServersPage() {
         ]}
       />
 
-      <ServerModal editing={serverModal} credentials={creds} onClose={() => setServerModal(null)} onSaved={reload} onCredentialCreated={credentials.reload} />
+      <ServerModal editing={serverModal} credentials={creds} users={users} onClose={() => setServerModal(null)} onSaved={reload} onCredentialCreated={credentials.reload} />
       <HostKeyModal server={hostKeyFor} onClose={() => setHostKeyFor(null)} onSaved={reload} />
       <TargetModal state={targetModal} credentials={creds} users={users} sources={meta?.sources ?? []} onClose={() => setTargetModal(null)} onSaved={reload} />
       <RebindModal target={rebindFor} users={users} onClose={() => setRebindFor(null)} onSaved={reload} />
