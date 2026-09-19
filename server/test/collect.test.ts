@@ -202,7 +202,7 @@ describe('邮件告警', () => {
     expect(await events(db)).toHaveLength(1);
     const mails = await outbox(db);
     expect(mails).toHaveLength(1);
-    expect(mails[0].to_addrs).toEqual(['zhangsan@example.com']);
+    expect(mails[0].to_addrs).toEqual(['admin@example.com']); // 只发管理员，不发给用户本人
     expect(mails[0].subject).toContain('Token 用量已超过 10,000,000 Token');
   });
 
@@ -218,7 +218,7 @@ describe('邮件告警', () => {
     expect(mail.body_text).toContain('本月估算费用：US$ 420.00');
     expect(mail.body_text).toContain('预算使用率：84%');
     expect(mail.body_text).toContain('数据更新时间：2026-09-19 14:00（Asia/Shanghai）');
-    expect(mail.to_addrs.sort()).toEqual(['admin@example.com', 'zhangsan@example.com']);
+    expect(mail.to_addrs).toEqual(['admin@example.com']);
 
     await collect(db, fakeExecutor(() => report({ '2026-09-12': [opus(1, 120)], '2026-09-19': [opus(1, 90)] })), targetB, at('2026-09-19 16:00'));
     expect((await events(db)).map((e) => e.tier)).toEqual([80, 100]);
@@ -272,11 +272,10 @@ describe('邮件告警', () => {
     expect(body).toContain('server-b /home/developer/.claude（最近成功采集：从未成功）');
   });
 
-  it('用户没有登记邮箱时，本应发给本人的提醒改发给管理员', async () => {
-    await db.query('UPDATE users SET email = NULL WHERE id = $1', [zhangsan]);
-    await addRule(db, { metric: 'cost', period: 'daily', tiers: [50] });
+  it('规则可额外指定收件邮箱；关闭“通知管理员”后只发给这些邮箱', async () => {
+    await db.query("INSERT INTO alert_rules (name, metric, period, tiers, notify_admins, extra_emails, created_at) VALUES ('r', 'cost', 'daily', '{50}', false, '{Finance@Example.com}', '2020-01-01')");
     await collect(db, fakeExecutor(() => report({ '2026-09-19': [opus(1, 60)] })), targetA, NOW);
-    expect((await outbox(db)).map((m) => m.to_addrs)).toEqual([['admin@example.com']]);
+    expect((await outbox(db)).map((m) => m.to_addrs)).toEqual([['finance@example.com']]);
   });
 
   it('团队与用户范围的规则只作用于对应用户', async () => {

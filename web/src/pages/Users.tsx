@@ -32,7 +32,7 @@ export function UsersPage() {
   const submit = async () => {
     const v = await form.validateFields();
     const body = {
-      name: v.name, email: v.email?.trim() ? v.email.trim() : null, role: v.role, team: v.team?.trim() ? v.team.trim() : null,
+      name: v.name, email: v.role === 'admin' && v.email?.trim() ? v.email.trim() : null, role: v.role, team: v.team?.trim() ? v.team.trim() : null,
       monthlyBudgetUsd: v.monthlyBudgetUsd ?? null, ...(v.password ? { password: v.password } : {}),
     };
     setSaving(true);
@@ -71,7 +71,6 @@ export function UsersPage() {
         columns={[
           { title: '姓名', fixed: 'left', render: (_v, u) => <Space style={{ whiteSpace: 'nowrap' }}><Link to={`/users/${u.id}`}>{u.name}</Link>{u.role === 'admin' && <Tag color="blue">管理员</Tag>}{!u.isActive && <Tag>已停用</Tag>}</Space> },
           { title: '团队', dataIndex: 'team', render: (v: string | null) => v ?? <Typography.Text type="secondary">未分组</Typography.Text> },
-          { title: '告警邮箱', dataIndex: 'email', render: (v: string | null) => v ?? <Typography.Text type="secondary">未登记</Typography.Text> },
           { title: '今日 Token', align: 'right', render: (_v, u) => <TokenCell value={u.todayTokens} />, sorter: (a, b) => (num(a.todayTokens) ?? 0) - (num(b.todayTokens) ?? 0) },
           { title: '本月 Token', align: 'right', render: (_v, u) => <TokenCell value={u.monthTokens} />, sorter: (a, b) => (num(a.monthTokens) ?? 0) - (num(b.monthTokens) ?? 0) },
           { title: '本月估算费用', align: 'right', render: (_v, u) => <CostCell value={u.monthCost} />, sorter: (a, b) => a.monthCost - b.monthCost },
@@ -103,15 +102,16 @@ export function UsersPage() {
               <InputNumber min={0} max={1e9} precision={2} style={{ width: 160 }} placeholder="不设预算" />
             </Form.Item>
           </Space>
-          <Form.Item name="email" label={isAdmin ? '邮箱（登录名）' : '告警收件邮箱（可选）'} normalize={(v?: string) => v?.trim()}
-            rules={[{ required: isAdmin, message: '管理员必须填写邮箱（邮箱即登录名）' }, { type: 'email', message: '邮箱格式不正确' }]}
-            extra={isAdmin ? undefined : '普通用户不需要登录网页。填了邮箱，超限提醒会发给本人；不填则改发给管理员。'}>
-            <Input maxLength={320} placeholder={isAdmin ? undefined : '可留空'} />
-          </Form.Item>
-          <Form.Item name="role" label="管理员账户" tooltip="只有管理员可以登录这个网页" style={{ marginBottom: isAdmin ? 16 : 24 }}
+          <Form.Item name="role" label="管理员账户" tooltip="只有管理员可以登录这个网页，告警邮件也只发给管理员" style={{ marginBottom: isAdmin ? 16 : 24 }}
             getValueProps={(v) => ({ checked: v === 'admin' })} getValueFromEvent={(checked: boolean) => (checked ? 'admin' : 'user')}>
             <Switch checkedChildren="是" unCheckedChildren="否" disabled={editing !== 'new' && editing?.id === me?.id} />
           </Form.Item>
+          {isAdmin && (
+            <Form.Item name="email" label="邮箱（登录名，也是告警收件地址）" normalize={(v?: string) => v?.trim()}
+              rules={[{ required: true, message: '管理员必须填写邮箱（邮箱即登录名）' }, { type: 'email', message: '邮箱格式不正确' }]}>
+              <Input maxLength={320} />
+            </Form.Item>
+          )}
           {isAdmin && (
             <Form.Item name="password" label={editingCanLogin ? '重置登录密码（留空则不修改）' : '登录密码'}
               rules={[{ required: !editingCanLogin, message: '请为管理员设置登录密码' }, { min: 10, message: '密码至少 10 位' }]}>

@@ -116,7 +116,7 @@ export interface RuleInput { name?: string; metric: 'tokens' | 'cost' | 'budget_
 export async function addRule(db: Db, r: RuleInput): Promise<string> {
   return (await db.query(
     'INSERT INTO alert_rules (name, metric, period, tiers, notify_admins, created_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
-    [r.name ?? `${r.metric}-${r.period}`, r.metric, r.period, r.tiers, r.notifyAdmins ?? false, r.createdAt ?? '2020-01-01T00:00:00Z'],
+    [r.name ?? `${r.metric}-${r.period}`, r.metric, r.period, r.tiers, r.notifyAdmins ?? true, r.createdAt ?? '2020-01-01T00:00:00Z'],
   )).rows[0].id;
 }
 

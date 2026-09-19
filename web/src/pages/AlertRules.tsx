@@ -9,7 +9,7 @@ import type { AlertRule, AlertRuleInput, Filters, Metric, Period, ScopeType } fr
 
 interface RuleForm {
   name: string; metric: Metric; period: Period; tiers: string[]; scopeType: ScopeType; scopeUserId?: string; scopeTeam?: string;
-  notifyUser: boolean; notifyAdmins: boolean; extraEmails: string[]; enabled: boolean;
+  notifyAdmins: boolean; extraEmails: string[]; enabled: boolean;
 }
 
 const fmtTier = (metric: Metric, t: number) => (metric === 'budget_pct' ? `${t}%` : metric === 'cost' ? fmtCost(t) : `${fmtFull(t)} Token`);
@@ -29,7 +29,7 @@ export function AlertRulesPage() {
     setEditing(r);
     form.resetFields();
     form.setFieldsValue(r === 'new'
-      ? { metric: 'budget_pct', period: 'monthly', tiers: ['80', '100'], scopeType: 'global', notifyUser: true, notifyAdmins: false, extraEmails: [], enabled: true }
+      ? { metric: 'budget_pct', period: 'monthly', tiers: ['80', '100'], scopeType: 'global', notifyAdmins: true, extraEmails: [], enabled: true }
       : { ...r, tiers: r.tiers.map(String), scopeUserId: r.scopeUserId ?? undefined, scopeTeam: r.scopeTeam ?? undefined });
   };
 
@@ -38,7 +38,7 @@ export function AlertRulesPage() {
     const body: AlertRuleInput = {
       name: v.name.trim(), metric: v.metric, period: v.metric === 'budget_pct' ? 'monthly' : v.period, tiers: v.tiers.map(Number),
       scopeType: v.scopeType, scopeUserId: v.scopeType === 'user' ? v.scopeUserId ?? null : null, scopeTeam: v.scopeType === 'team' ? v.scopeTeam ?? null : null,
-      notifyUser: v.notifyUser, notifyAdmins: v.notifyAdmins, extraEmails: v.extraEmails ?? [], enabled: v.enabled,
+      notifyAdmins: v.notifyAdmins, extraEmails: v.extraEmails ?? [], enabled: v.enabled,
     };
     setSaving(true);
     try {
@@ -76,7 +76,7 @@ export function AlertRulesPage() {
           {
             title: '收件人', render: (_v, r) => (
               <Space size={4} wrap>
-                {r.notifyUser && <Tag>用户本人</Tag>}{r.notifyAdmins && <Tag>管理员</Tag>}
+                {r.notifyAdmins && <Tag>管理员</Tag>}
                 {r.extraEmails.map((e) => <Tag key={e}>{e}</Tag>)}
               </Space>
             ),
@@ -135,13 +135,12 @@ export function AlertRulesPage() {
           )}
           <Form.Item label="收件人" required style={{ marginBottom: 8 }}>
             <Space size={24}>
-              <Form.Item name="notifyUser" valuePropName="checked" noStyle><Checkbox>用户本人</Checkbox></Form.Item>
               <Form.Item name="notifyAdmins" valuePropName="checked" noStyle><Checkbox>全部管理员</Checkbox></Form.Item>
             </Space>
           </Form.Item>
           <Form.Item name="extraEmails" label="额外收件邮箱"
             rules={[{ validator: (_r, v: string[] | undefined) => ((v ?? []).every((e) => EMAIL.test(e)) ? Promise.resolve() : Promise.reject(new Error('包含无效的邮箱地址'))) },
-              ({ getFieldValue }) => ({ validator: (_r, v: string[] | undefined) => (getFieldValue('notifyUser') || getFieldValue('notifyAdmins') || (v ?? []).length > 0 ? Promise.resolve() : Promise.reject(new Error('至少需要一类收件人'))) })]}>
+              ({ getFieldValue }) => ({ validator: (_r, v: string[] | undefined) => (getFieldValue('notifyAdmins') || (v ?? []).length > 0 ? Promise.resolve() : Promise.reject(new Error('至少需要一类收件人'))) })]}>
             <Select mode="tags" open={false} suffixIcon={null} tokenSeparators={[',', ';', ' ']} placeholder="输入邮箱后回车，可留空" />
           </Form.Item>
           <Form.Item name="enabled" label="启用" valuePropName="checked"><Switch /></Form.Item>

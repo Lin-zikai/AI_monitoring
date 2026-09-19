@@ -207,7 +207,7 @@ describe('管理操作', () => {
   it('告警规则校验：预算百分比只能按月，至少一类收件人', async () => {
     const base = { name: 'r', metric: 'budget_pct', period: 'monthly', tiers: [80, 100] };
     expect((await send('POST', '/api/alerts/rules', adminCookie, { ...base, period: 'daily' })).statusCode).toBe(400);
-    expect((await send('POST', '/api/alerts/rules', adminCookie, { ...base, notifyUser: false })).statusCode).toBe(400);
+    expect((await send('POST', '/api/alerts/rules', adminCookie, { ...base, notifyAdmins: false })).statusCode).toBe(400);
     expect((await send('POST', '/api/alerts/rules', adminCookie, base)).statusCode).toBe(201);
     expect((await get('/api/alerts/rules', adminCookie)).json().rules[0].tiers).toEqual([80, 100]);
   });

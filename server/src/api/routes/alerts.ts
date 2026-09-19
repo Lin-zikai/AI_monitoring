@@ -12,8 +12,7 @@ const ruleSchema = z.object({
   scopeType: z.enum(['global', 'team', 'user']).default('global'),
   scopeUserId: z.string().uuid().nullable().default(null),
   scopeTeam: z.string().trim().min(1).max(100).nullable().default(null),
-  notifyUser: z.boolean().default(true),
-  notifyAdmins: z.boolean().default(false),
+  notifyAdmins: z.boolean().default(true),
   extraEmails: z.array(z.string().email().max(320)).max(20).default([]),
   enabled: z.boolean().default(true),
 }).superRefine((r, ctx) => {
@@ -23,11 +22,11 @@ const ruleSchema = z.object({
   if (new Set(r.tiers).size !== r.tiers.length) ctx.addIssue({ code: 'custom', path: ['tiers'], message: '阈值档位不能重复' });
   if ((r.scopeType === 'user') !== (r.scopeUserId !== null)) ctx.addIssue({ code: 'custom', path: ['scopeUserId'], message: '适用范围为用户时必须且只能指定用户' });
   if ((r.scopeType === 'team') !== (r.scopeTeam !== null)) ctx.addIssue({ code: 'custom', path: ['scopeTeam'], message: '适用范围为团队时必须且只能指定团队' });
-  if (!r.notifyUser && !r.notifyAdmins && r.extraEmails.length === 0) ctx.addIssue({ code: 'custom', path: ['notifyUser'], message: '至少需要一类收件人' });
+  if (!r.notifyAdmins && r.extraEmails.length === 0) ctx.addIssue({ code: 'custom', path: ['notifyAdmins'], message: '至少需要一类收件人' });
 });
 
 const RULE_COLUMNS = `r.id, r.name, r.metric, r.period, r.tiers::float8[] AS tiers, r.scope_type AS "scopeType", r.scope_user_id AS "scopeUserId",
-  r.scope_team AS "scopeTeam", r.notify_user AS "notifyUser", r.notify_admins AS "notifyAdmins", r.extra_emails AS "extraEmails",
+  r.scope_team AS "scopeTeam", r.notify_admins AS "notifyAdmins", r.extra_emails AS "extraEmails",
   r.enabled, r.created_at AS "createdAt", r.updated_at AS "updatedAt"`;
 
 export async function alertRoutes(app: FastifyInstance, ctx: RouteContext): Promise<void> {
@@ -42,9 +41,9 @@ export async function alertRoutes(app: FastifyInstance, ctx: RouteContext): Prom
   app.post('/alerts/rules', admin, async (req, reply) => {
     const b = parse(ruleSchema, req.body);
     const res = await db.query(
-      `INSERT INTO alert_rules (name, metric, period, tiers, scope_type, scope_user_id, scope_team, notify_user, notify_admins, extra_emails, enabled)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
-      [b.name, b.metric, b.period, [...b.tiers].sort((x, y) => x - y), b.scopeType, b.scopeUserId, b.scopeTeam, b.notifyUser, b.notifyAdmins, b.extraEmails, b.enabled],
+      `INSERT INTO alert_rules (name, metric, period, tiers, scope_type, scope_user_id, scope_team, notify_admins, extra_emails, enabled)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+      [b.name, b.metric, b.period, [...b.tiers].sort((x, y) => x - y), b.scopeType, b.scopeUserId, b.scopeTeam, b.notifyAdmins, b.extraEmails, b.enabled],
     ).catch(mapDbError);
     await audit(db, req, 'alert_rule.create', 'alert_rule', res.rows[0].id, b);
     return reply.status(201).send({ id: res.rows[0].id });
@@ -55,8 +54,8 @@ export async function alertRoutes(app: FastifyInstance, ctx: RouteContext): Prom
     const b = parse(ruleSchema, req.body);
     const res = await db.query(
       `UPDATE alert_rules SET name = $2, metric = $3, period = $4, tiers = $5, scope_type = $6, scope_user_id = $7, scope_team = $8,
-              notify_user = $9, notify_admins = $10, extra_emails = $11, enabled = $12, updated_at = now() WHERE id = $1`,
-      [id, b.name, b.metric, b.period, [...b.tiers].sort((x, y) => x - y), b.scopeType, b.scopeUserId, b.scopeTeam, b.notifyUser, b.notifyAdmins, b.extraEmails, b.enabled],
+              notify_admins = $9, extra_emails = $10, enabled = $11, updated_at = now() WHERE id = $1`,
+      [id, b.name, b.metric, b.period, [...b.tiers].sort((x, y) => x - y), b.scopeType, b.scopeUserId, b.scopeTeam, b.notifyAdmins, b.extraEmails, b.enabled],
     ).catch(mapDbError);
     if (res.rowCount === 0) throw notFound('告警规则');
     await audit(db, req, 'alert_rule.update', 'alert_rule', id, b);

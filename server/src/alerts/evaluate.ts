@@ -21,7 +21,7 @@ interface Period { type: 'daily' | 'monthly'; key: string; first: string; last: 
 
 interface RuleRow {
   id: string; name: string; metric: 'tokens' | 'cost' | 'budget_pct'; period: 'daily' | 'monthly';
-  tiers: string[]; notify_user: boolean; notify_admins: boolean; extra_emails: string[]; created_at: Date;
+  tiers: string[]; notify_admins: boolean; extra_emails: string[]; created_at: Date;
 }
 
 export function periodsToEvaluate(today: string, touchedSince: string, includeEnded: boolean): Period[] {
@@ -58,7 +58,7 @@ export async function evaluateUsageAlerts(tx: Tx, input: EvaluateInput): Promise
     if (!user) continue;
 
     const rules = (await tx.query<RuleRow>(
-      `SELECT id, name, metric, period, tiers::text[] AS tiers, notify_user, notify_admins, extra_emails, created_at
+      `SELECT id, name, metric, period, tiers::text[] AS tiers, notify_admins, extra_emails, created_at
          FROM alert_rules
         WHERE enabled AND (scope_type = 'global' OR (scope_type = 'team' AND scope_team = $2) OR (scope_type = 'user' AND scope_user_id = $1))`,
       [userId, user.team],
@@ -120,7 +120,7 @@ export async function evaluateUsageAlerts(tx: Tx, input: EvaluateInput): Promise
           await tx.query("UPDATE alert_events SET email_note = '同次评估已触发更高档位，未单独发信' WHERE id = $1", [lower.id]);
         }
 
-        const recipients = await resolveRecipients(tx, rule, user);
+        const recipients = await resolveRecipients(tx, rule);
         if (recipients.length === 0) {
           await tx.query("UPDATE alert_events SET email_note = '没有可用的收件人' WHERE id = $1", [top.id]);
           continue;
@@ -160,12 +160,10 @@ export async function adminEmails(tx: Tx): Promise<string[]> {
   return (await tx.query("SELECT email FROM users WHERE role = 'admin' AND is_active AND email IS NOT NULL ORDER BY email")).rows.map((r) => r.email);
 }
 
-async function resolveRecipients(tx: Tx, rule: RuleRow, user: { email: string | null; is_active: boolean }): Promise<string[]> {
+/** 收件人：管理员 + 规则里额外指定的邮箱。被统计的用户不登录网页，也不直接收告警邮件。 */
+async function resolveRecipients(tx: Tx, rule: RuleRow): Promise<string[]> {
   const out = new Set<string>();
-  const reachable = user.is_active && Boolean(user.email);
-  if (rule.notify_user && reachable) out.add(user.email!.toLowerCase());
-  // 规则要求通知本人、但该用户没有登记邮箱：改为通知管理员，避免告警无人收到
-  if (rule.notify_admins || (rule.notify_user && !reachable)) for (const e of await adminEmails(tx)) out.add(e.toLowerCase());
+  if (rule.notify_admins) for (const e of await adminEmails(tx)) out.add(e.toLowerCase());
   for (const e of rule.extra_emails) out.add(e.toLowerCase());
   return [...out];
 }
