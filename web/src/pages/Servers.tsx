@@ -1,10 +1,10 @@
-import { DownOutlined, HistoryOutlined, PlusOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { DownOutlined, FolderOpenOutlined, HistoryOutlined, PlusOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import {
   Alert, App, Badge, Button, Checkbox, DatePicker, Descriptions, Drawer, Dropdown, Form, Input, InputNumber, Modal, Radio, Select, Space,
   Switch, Table, Tabs, Tag, Tooltip, Typography,
 } from 'antd';
 import dayjs, { type Dayjs } from 'dayjs';
-import { useState } from 'react';
+import { useRef, useState, type DragEvent } from 'react';
 import { api, ApiError, errorMessage } from '../api';
 import { PageTitle, RUN_STATUS } from '../components/common';
 import { useMeta } from '../components/Layout';
@@ -15,6 +15,57 @@ import type { Credential, Filters, Run, Server, Target } from '../types';
 const { Text, Paragraph } = Typography;
 
 // ---------------------------------------------------------------- 凭据
+
+const MAX_KEY_FILE_BYTES = 20_000;
+
+/** 私钥输入：可直接粘贴，也可把密钥文件拖进来或点按钮选择。文件只在浏览器内读取成文本，不会单独上传。 */
+function PrivateKeyInput({ value, onChange, onFileName }: { value?: string; onChange?: (v: string) => void; onFileName?: (name: string) => void }) {
+  const [dragging, setDragging] = useState(false);
+  const picker = useRef<HTMLInputElement>(null);
+  const { message } = App.useApp();
+
+  const loadFile = async (file: File | undefined) => {
+    if (!file) return;
+    if (file.size > MAX_KEY_FILE_BYTES) return void message.error('文件过大，不像是 SSH 私钥');
+    const text = (await file.text()).replace(/\r\n/g, '\n');
+    if (/^(ssh-|ecdsa-|sk-)\S+ AAAA/.test(text.trim())) return void message.error(`“${file.name}”是公钥文件，请选择不带 .pub 后缀的私钥文件`);
+    if (!/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(text)) return void message.error(`“${file.name}”不是 OpenSSH / PEM 格式的私钥`);
+    onChange?.(text);
+    onFileName?.(file.name);
+    message.success(`已读取 ${file.name}`);
+  };
+
+  const onDrop = (e: DragEvent) => {
+    e.preventDefault(); // 否则浏览器会直接打开被拖入的文件
+    setDragging(false);
+    void loadFile(e.dataTransfer.files[0]);
+  };
+
+  return (
+    <div
+      onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); setDragging(true); } }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={onDrop}
+      style={{ position: 'relative' }}
+    >
+      <Input.TextArea
+        value={value} onChange={(e) => onChange?.(e.target.value)} rows={8} spellCheck={false} autoComplete="off"
+        placeholder={'在此粘贴私钥内容，或把私钥文件（如 id_ed25519）拖到这里\n-----BEGIN OPENSSH PRIVATE KEY-----'}
+        style={{ fontFamily: 'monospace', fontSize: 12, ...(dragging ? { borderColor: '#2a78d6', borderStyle: 'dashed' } : {}) }}
+      />
+      {dragging && (
+        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(42,120,214,0.08)', borderRadius: 6, pointerEvents: 'none', color: '#2a78d6', fontWeight: 500 }}>
+          松开以读取私钥文件
+        </div>
+      )}
+      <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Button size="small" icon={<FolderOpenOutlined />} onClick={() => picker.current?.click()}>选择文件</Button>
+        <Text type="secondary" style={{ fontSize: 12 }}>文件只在浏览器内读取，随表单一起提交</Text>
+        <input ref={picker} type="file" style={{ display: 'none' }} onChange={(e) => { void loadFile(e.target.files?.[0]); e.target.value = ''; }} />
+      </div>
+    </div>
+  );
+}
 
 function CredentialModal({ mode, onClose, onSaved }: { mode: { kind: 'create' } | { kind: 'rotate'; credential: Credential } | null; onClose: () => void; onSaved: () => void }) {
   const [form] = Form.useForm<{ name: string; privateKey: string; passphrase?: string }>();
@@ -46,8 +97,8 @@ function CredentialModal({ mode, onClose, onSaved }: { mode: { kind: 'create' } 
       <Alert type="info" showIcon style={{ marginBottom: 16 }} title="私钥提交后会加密保存，之后任何界面和接口都只显示名称与公钥指纹，无法再次查看明文。请使用专用采集账户的密钥。" />
       <Form form={form} layout="vertical" autoComplete="off">
         {mode?.kind === 'create' && <Form.Item name="name" label="凭据名称" rules={[{ required: true, message: '请输入名称' }]}><Input maxLength={100} placeholder="例如：collector-ed25519" /></Form.Item>}
-        <Form.Item name="privateKey" label="SSH 私钥（OpenSSH / PEM 格式）" rules={[{ required: true, min: 50, message: '请粘贴完整的私钥' }]}>
-          <Input.TextArea rows={8} spellCheck={false} autoComplete="off" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" style={{ fontFamily: 'monospace', fontSize: 12 }} />
+        <Form.Item name="privateKey" label="SSH 私钥（OpenSSH / PEM 格式）" rules={[{ required: true, min: 50, message: '请粘贴完整的私钥，或拖入私钥文件' }]}>
+          <PrivateKeyInput onFileName={(name) => { if (mode?.kind === 'create' && !form.getFieldValue('name')) form.setFieldValue('name', name); }} />
         </Form.Item>
         <Form.Item name="passphrase" label="私钥口令（如有）"><Input.Password autoComplete="new-password" /></Form.Item>
       </Form>
