@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { supportedSources } from '../../collect/adapter.js';
 import type { RouteContext } from '../app.js';
 import { audit, currentUser, HttpError, mapDbError, notFound, parse } from '../http.js';
 import { idParam } from './users.js';
@@ -9,6 +10,8 @@ const ruleSchema = z.object({
   metric: z.enum(['tokens', 'cost', 'budget_pct']),
   period: z.enum(['daily', 'monthly']),
   tiers: z.array(z.number().positive().max(1e15)).min(1).max(10),
+  /** 限定数据源；null = 所有数据源合计 */
+  source: z.string().refine((v) => supportedSources().includes(v), '不支持的数据源').nullable().default(null),
   scopeType: z.enum(['global', 'team', 'user']).default('global'),
   scopeUserId: z.string().uuid().nullable().default(null),
   scopeTeam: z.string().trim().min(1).max(100).nullable().default(null),
@@ -25,7 +28,7 @@ const ruleSchema = z.object({
   if (!r.notifyAdmins && r.extraEmails.length === 0) ctx.addIssue({ code: 'custom', path: ['notifyAdmins'], message: '至少需要一类收件人' });
 });
 
-const RULE_COLUMNS = `r.id, r.name, r.metric, r.period, r.tiers::float8[] AS tiers, r.scope_type AS "scopeType", r.scope_user_id AS "scopeUserId",
+const RULE_COLUMNS = `r.id, r.name, r.metric, r.period, r.source, r.tiers::float8[] AS tiers, r.scope_type AS "scopeType", r.scope_user_id AS "scopeUserId",
   r.scope_team AS "scopeTeam", r.notify_admins AS "notifyAdmins", r.extra_emails AS "extraEmails",
   r.enabled, r.created_at AS "createdAt", r.updated_at AS "updatedAt"`;
 
@@ -41,9 +44,9 @@ export async function alertRoutes(app: FastifyInstance, ctx: RouteContext): Prom
   app.post('/alerts/rules', admin, async (req, reply) => {
     const b = parse(ruleSchema, req.body);
     const res = await db.query(
-      `INSERT INTO alert_rules (name, metric, period, tiers, scope_type, scope_user_id, scope_team, notify_admins, extra_emails, enabled)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
-      [b.name, b.metric, b.period, [...b.tiers].sort((x, y) => x - y), b.scopeType, b.scopeUserId, b.scopeTeam, b.notifyAdmins, b.extraEmails, b.enabled],
+      `INSERT INTO alert_rules (name, metric, period, tiers, scope_type, scope_user_id, scope_team, notify_admins, extra_emails, enabled, source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
+      [b.name, b.metric, b.period, [...b.tiers].sort((x, y) => x - y), b.scopeType, b.scopeUserId, b.scopeTeam, b.notifyAdmins, b.extraEmails, b.enabled, b.source],
     ).catch(mapDbError);
     await audit(db, req, 'alert_rule.create', 'alert_rule', res.rows[0].id, b);
     return reply.status(201).send({ id: res.rows[0].id });
@@ -54,8 +57,8 @@ export async function alertRoutes(app: FastifyInstance, ctx: RouteContext): Prom
     const b = parse(ruleSchema, req.body);
     const res = await db.query(
       `UPDATE alert_rules SET name = $2, metric = $3, period = $4, tiers = $5, scope_type = $6, scope_user_id = $7, scope_team = $8,
-              notify_admins = $9, extra_emails = $10, enabled = $11, updated_at = now() WHERE id = $1`,
-      [id, b.name, b.metric, b.period, [...b.tiers].sort((x, y) => x - y), b.scopeType, b.scopeUserId, b.scopeTeam, b.notifyAdmins, b.extraEmails, b.enabled],
+              notify_admins = $9, extra_emails = $10, enabled = $11, source = $12, updated_at = now() WHERE id = $1`,
+      [id, b.name, b.metric, b.period, [...b.tiers].sort((x, y) => x - y), b.scopeType, b.scopeUserId, b.scopeTeam, b.notifyAdmins, b.extraEmails, b.enabled, b.source],
     ).catch(mapDbError);
     if (res.rowCount === 0) throw notFound('告警规则');
     await audit(db, req, 'alert_rule.update', 'alert_rule', id, b);
@@ -83,7 +86,7 @@ export async function alertRoutes(app: FastifyInstance, ctx: RouteContext): Prom
     const userId = me.role === 'admin' ? q.userId ?? null : me.id;
     const kind = me.role === 'admin' ? q.kind ?? null : 'usage';
     const res = await db.query(
-      `SELECT e.id, e.kind, e.rule_name AS "ruleName", e.user_id AS "userId", u.name AS "userName", e.metric, e.period_type AS "periodType",
+      `SELECT e.id, e.kind, e.source, e.rule_name AS "ruleName", e.user_id AS "userId", u.name AS "userName", e.metric, e.period_type AS "periodType",
               e.period_key AS "periodKey", e.tier::float8 AS tier, e.observed_value::float8 AS "observedValue", e.threshold_value::float8 AS "thresholdValue",
               e.data_as_of AS "dataAsOf", e.incomplete, e.email_note AS "emailNote", e.created_at AS "createdAt",
               s.name AS "serverName", t.data_dir AS "dataDir",

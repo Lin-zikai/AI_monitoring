@@ -118,7 +118,7 @@ export type EmailStatus = 'pending' | 'sending' | 'sent' | 'failed';
 
 export interface AlertRuleInput {
   name: string; metric: Metric; period: Period; tiers: number[]; scopeType: ScopeType; scopeUserId: string | null; scopeTeam: string | null;
-  notifyAdmins: boolean; extraEmails: string[]; enabled: boolean;
+  source: string | null; notifyAdmins: boolean; extraEmails: string[]; enabled: boolean;
 }
 export interface AlertRule extends AlertRuleInput { id: string; scopeUserName: string | null; createdAt: string; updatedAt: string }
 

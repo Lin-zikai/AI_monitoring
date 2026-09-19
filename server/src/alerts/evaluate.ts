@@ -20,7 +20,7 @@ export interface EvaluateInput {
 interface Period { type: 'daily' | 'monthly'; key: string; first: string; last: string; ended: boolean }
 
 interface RuleRow {
-  id: string; name: string; metric: 'tokens' | 'cost' | 'budget_pct'; period: 'daily' | 'monthly';
+  id: string; name: string; metric: 'tokens' | 'cost' | 'budget_pct'; period: 'daily' | 'monthly'; source: string | null; scope_type: 'global' | 'team' | 'user';
   tiers: string[]; notify_admins: boolean; extra_emails: string[]; created_at: Date;
 }
 
@@ -58,7 +58,7 @@ export async function evaluateUsageAlerts(tx: Tx, input: EvaluateInput): Promise
     if (!user) continue;
 
     const rules = (await tx.query<RuleRow>(
-      `SELECT id, name, metric, period, tiers::text[] AS tiers, notify_admins, extra_emails, created_at
+      `SELECT id, name, metric, period, source, scope_type, tiers::text[] AS tiers, notify_admins, extra_emails, created_at
          FROM alert_rules
         WHERE enabled AND (scope_type = 'global' OR (scope_type = 'team' AND scope_team = $2) OR (scope_type = 'user' AND scope_user_id = $1))`,
       [userId, user.team],
@@ -68,20 +68,27 @@ export async function evaluateUsageAlerts(tx: Tx, input: EvaluateInput): Promise
     let incomplete: IncompleteSource[] | undefined;
     const sums = new Map<string, { tokens: string; cost: string; asOf: Date | null }>();
 
-    for (const rule of rules) {
+    // 越具体的规则优先：同一指标 + 周期下，给某个用户单独设了规则，就不再对他套用团队/全局规则（团队规则同理优先于全局）
+    const SPECIFICITY = { user: 2, team: 1, global: 0 } as const;
+    const best = new Map<string, number>();
+    for (const r of rules) best.set(`${r.metric}:${r.period}`, Math.max(best.get(`${r.metric}:${r.period}`) ?? 0, SPECIFICITY[r.scope_type]));
+    const applicable = rules.filter((r) => SPECIFICITY[r.scope_type] === best.get(`${r.metric}:${r.period}`));
+
+    for (const rule of applicable) {
       for (const period of periods.filter((p) => p.type === rule.period)) {
         // 已结束周期只对周期结束前就存在的规则评估，避免新建规则立刻为过去的周期发信
         if (period.ended && rule.created_at >= zonedHourToUtc(addDays(period.last, 1), 0, settings.timezone)) continue;
 
-        let sum = sums.get(period.key);
+        const sumKey = `${period.key}|${rule.source ?? '*'}`;
+        let sum = sums.get(sumKey);
         if (!sum) {
           const r = (await tx.query(
             `SELECT COALESCE(sum(total_tokens), 0)::text AS tokens, COALESCE(sum(cost_usd), 0)::text AS cost, max(collected_at) AS as_of
-               FROM usage_daily WHERE user_id = $1 AND usage_date BETWEEN $2 AND $3`,
-            [userId, period.first, period.last],
+               FROM usage_daily WHERE user_id = $1 AND usage_date BETWEEN $2 AND $3 AND ($4::text IS NULL OR source = $4)`,
+            [userId, period.first, period.last, rule.source],
           )).rows[0];
           sum = { tokens: r.tokens, cost: r.cost, asOf: r.as_of };
-          sums.set(period.key, sum);
+          sums.set(sumKey, sum);
         }
 
         const observed = rule.metric === 'tokens' ? toMicros(sum.tokens) : toMicros(sum.cost);
@@ -101,12 +108,12 @@ export async function evaluateUsageAlerts(tx: Tx, input: EvaluateInput): Promise
           const res = await tx.query(
             `INSERT INTO alert_events
                (kind, dedupe_key, rule_id, rule_name, user_id, metric, period_type, period_key, tier,
-                observed_value, threshold_value, data_as_of, incomplete, incomplete_detail, run_id)
-             VALUES ('usage', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                observed_value, threshold_value, data_as_of, incomplete, incomplete_detail, run_id, source)
+             VALUES ('usage', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
              ON CONFLICT (dedupe_key) DO NOTHING RETURNING id`,
             [
               `usage:${userId}:${rule.id}:${period.key}:${Number(c.tier)}`, rule.id, rule.name, userId, rule.metric, period.type, period.key, c.tier,
-              fromMicros(observed), fromMicros(c.threshold), sum.asOf ?? now, incomplete.length > 0, JSON.stringify(incomplete), input.runId,
+              fromMicros(observed), fromMicros(c.threshold), sum.asOf ?? now, incomplete.length > 0, JSON.stringify(incomplete), input.runId, rule.source,
             ],
           );
           if (res.rows[0]) inserted.push({ id: res.rows[0].id, tier: c.tier, threshold: c.threshold });
@@ -126,7 +133,7 @@ export async function evaluateUsageAlerts(tx: Tx, input: EvaluateInput): Promise
           continue;
         }
         const mail = renderUsageAlert({
-          userId, userName: user.name, ruleName: rule.name, metric: rule.metric, periodType: period.type, periodKey: period.key,
+          userId, userName: user.name, ruleName: rule.name, source: rule.source, metric: rule.metric, periodType: period.type, periodKey: period.key,
           tier: top.tier, observed: rule.metric === 'tokens' ? sum.tokens : sum.cost,
           threshold: rule.metric === 'tokens' ? String(top.threshold / 1_000_000n) : fromMicros(top.threshold),
           budget, dataAsOf: sum.asOf ?? now, timezone: settings.timezone, intervalHours: settings.collectIntervalHours,

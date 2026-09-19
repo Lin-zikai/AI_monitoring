@@ -1,4 +1,5 @@
 import { formatUsd } from '../util/money.js';
+import { SOURCE_INFO } from '../collect/adapter.js';
 import { formatInTz } from '../util/time.js';
 
 export interface IncompleteSource { server: string; dataDir: string; lastSuccessAt: string | null }
@@ -7,6 +8,8 @@ export interface UsageAlertMail {
   userId: string;
   userName: string;
   ruleName: string;
+  /** 规则限定的数据源；null = 所有数据源合计 */
+  source?: string | null;
   metric: 'tokens' | 'cost' | 'budget_pct';
   periodType: 'daily' | 'monthly';
   periodKey: string;
@@ -23,20 +26,22 @@ export interface UsageAlertMail {
 
 const formatTokens = (v: string) => `${Number(v).toLocaleString('en-US')} Token`;
 const periodLabel = (t: 'daily' | 'monthly') => (t === 'daily' ? '当日' : '本月');
+const over = (observed: string, threshold: string) => Math.max(0, Number(observed) - Number(threshold));
 
 export function renderUsageAlert(m: UsageAlertMail): { subject: string; text: string } {
   const lines = [`用户：${m.userName}`, `统计周期：${m.periodKey}`, `触发规则：${m.ruleName}`];
   let subject: string;
+  const scope = m.source ? ` ${SOURCE_INFO[m.source]?.label ?? m.source} ` : '';
   if (m.metric === 'budget_pct') {
     const pct = m.budget && Number(m.budget) > 0 ? Math.floor((Number(m.observed) / Number(m.budget)) * 100) : 0;
     subject = `[用量提醒] ${m.userName}本月预算已达到 ${Number(m.tier)}%`;
     lines.push(`本月估算费用：${formatUsd(m.observed)}`, `月度预算：${formatUsd(m.budget)}`, `预算使用率：${pct}%`);
   } else if (m.metric === 'cost') {
-    subject = `[用量提醒] ${m.userName}${periodLabel(m.periodType)}估算费用已超过 ${formatUsd(m.threshold)}`;
-    lines.push(`${periodLabel(m.periodType)}估算费用：${formatUsd(m.observed)}`, `阈值：${formatUsd(m.threshold)}`);
+    subject = `[用量提醒] ${m.userName} ${periodLabel(m.periodType)}${scope}估算费用 ${formatUsd(m.observed)}，已超过 ${formatUsd(m.threshold)}`;
+    lines.push(`数据范围：${scope.trim() || '全部数据源合计'}`, `${periodLabel(m.periodType)}估算费用：${formatUsd(m.observed)}`, `阈值：${formatUsd(m.threshold)}`, `超出：${formatUsd(over(m.observed, m.threshold).toFixed(2))}`);
   } else {
-    subject = `[用量提醒] ${m.userName}${periodLabel(m.periodType)} Token 用量已超过 ${formatTokens(m.threshold)}`;
-    lines.push(`${periodLabel(m.periodType)}累计：${formatTokens(m.observed)}`, `阈值：${formatTokens(m.threshold)}`);
+    subject = `[用量提醒] ${m.userName} ${periodLabel(m.periodType)}${scope} Token 用量 ${formatTokens(m.observed)}，已超过 ${formatTokens(m.threshold)}`;
+    lines.push(`数据范围：${scope.trim() || '全部数据源合计'}`, `${periodLabel(m.periodType)}累计：${formatTokens(m.observed)}`, `阈值：${formatTokens(m.threshold)}`, `超出：${formatTokens(String(Math.round(over(m.observed, m.threshold))))}`);
   }
   lines.push(`数据更新时间：${formatInTz(m.dataAsOf, m.timezone)}（${m.timezone}）`, `自动采集周期：每 ${m.intervalHours} 小时`);
   if (m.incomplete.length > 0) {

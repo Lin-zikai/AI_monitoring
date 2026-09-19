@@ -8,10 +8,11 @@ import { useFetch } from '../hooks';
 import type { AlertRule, AlertRuleInput, Filters, Metric, Period, ScopeType } from '../types';
 
 interface RuleForm {
-  name: string; metric: Metric; period: Period; tiers: string[]; scopeType: ScopeType; scopeUserId?: string; scopeTeam?: string;
+  name: string; metric: Metric; period: Period; source: string; tiers: string[]; scopeType: ScopeType; scopeUserId?: string; scopeTeam?: string;
   notifyAdmins: boolean; extraEmails: string[]; enabled: boolean;
 }
 
+const SOURCE_OPTIONS = [{ value: 'claude-code', label: '仅 Claude Code' }, { value: 'codex', label: '仅 Codex' }];
 const fmtTier = (metric: Metric, t: number) => (metric === 'budget_pct' ? `${t}%` : metric === 'cost' ? fmtCost(t) : `${fmtFull(t)} Token`);
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -29,14 +30,14 @@ export function AlertRulesPage() {
     setEditing(r);
     form.resetFields();
     form.setFieldsValue(r === 'new'
-      ? { metric: 'budget_pct', period: 'monthly', tiers: ['80', '100'], scopeType: 'global', notifyAdmins: true, extraEmails: [], enabled: true }
-      : { ...r, tiers: r.tiers.map(String), scopeUserId: r.scopeUserId ?? undefined, scopeTeam: r.scopeTeam ?? undefined });
+      ? { metric: 'budget_pct', period: 'monthly', source: 'all', tiers: ['80', '100'], scopeType: 'global', notifyAdmins: true, extraEmails: [], enabled: true }
+      : { ...r, source: r.source ?? 'all', tiers: r.tiers.map(String), scopeUserId: r.scopeUserId ?? undefined, scopeTeam: r.scopeTeam ?? undefined });
   };
 
   const submit = async () => {
     const v = await form.validateFields();
     const body: AlertRuleInput = {
-      name: v.name.trim(), metric: v.metric, period: v.metric === 'budget_pct' ? 'monthly' : v.period, tiers: v.tiers.map(Number),
+      name: v.name.trim(), source: v.source === 'all' ? null : v.source, metric: v.metric, period: v.metric === 'budget_pct' ? 'monthly' : v.period, tiers: v.tiers.map(Number),
       scopeType: v.scopeType, scopeUserId: v.scopeType === 'user' ? v.scopeUserId ?? null : null, scopeTeam: v.scopeType === 'team' ? v.scopeTeam ?? null : null,
       notifyAdmins: v.notifyAdmins, extraEmails: v.extraEmails ?? [], enabled: v.enabled,
     };
@@ -70,7 +71,7 @@ export function AlertRulesPage() {
         size="middle" rowKey="id" loading={rules.loading} dataSource={rules.data?.rules ?? []} pagination={false} scroll={{ x: 1000 }}
         columns={[
           { title: '名称', dataIndex: 'name' },
-          { title: '指标', render: (_v, r) => `${PERIOD_LABEL[r.period]}${METRIC_LABEL[r.metric]}` },
+          { title: '指标', render: (_v, r) => <>{`${PERIOD_LABEL[r.period]}${METRIC_LABEL[r.metric]}`} {r.source && <Tag>{SOURCE_OPTIONS.find((o) => o.value === r.source)?.label ?? r.source}</Tag>}</> },
           { title: '阈值档位', render: (_v, r) => <Space size={4} wrap>{r.tiers.map((t) => <Tag key={t}>{fmtTier(r.metric, t)}</Tag>)}</Space> },
           { title: '适用范围', render: (_v, r) => (r.scopeType === 'global' ? '全部用户' : r.scopeType === 'team' ? `团队：${r.scopeTeam}` : `用户：${r.scopeUserName ?? r.scopeUserId}`) },
           {
@@ -100,6 +101,9 @@ export function AlertRulesPage() {
               <Radio.Group disabled={metric === 'budget_pct'} options={[{ value: 'daily', label: '每日（自然日）' }, { value: 'monthly', label: '每月（自然月）' }]} />
             </Form.Item>
           </Space>
+          <Form.Item name="source" label="数据范围" extra="选某一个数据源时，只统计该数据源的用量（例如只看 Codex 的日费用）。给某个用户单独设了规则后，同一指标和周期的全局 / 团队规则不再对他生效。">
+            <Radio.Group options={[{ value: 'all', label: '全部数据源合计' }, ...SOURCE_OPTIONS]} />
+          </Form.Item>
           <Form.Item
             name="tiers" label={`阈值档位（${metric === 'budget_pct' ? '百分比，如 80、100' : metric === 'cost' ? 'US$' : 'Token 数，如 10000000'}）`}
             extra={metric === 'budget_pct' ? '按用户各自的月预算计算；未设置月预算的用户不触发。输入后回车，可添加多个档位，每个档位分别提醒一次。' : '输入数值后回车，可添加多个档位，每个档位在每个周期分别提醒一次。'}

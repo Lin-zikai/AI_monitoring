@@ -217,7 +217,7 @@ describe('邮件告警', () => {
     const mails = await outbox(db);
     expect(mails).toHaveLength(1);
     expect(mails[0].to_addrs).toEqual(['admin@example.com']); // 只发管理员，不发给用户本人
-    expect(mails[0].subject).toContain('Token 用量已超过 10,000,000 Token');
+    expect(mails[0].subject).toBe('[用量提醒] zhangsan 当日 Token 用量 12,000,000 Token，已超过 10,000,000 Token');
   });
 
   it('月预算 80% 与 100% 分别提醒；汇总用户所有来源', async () => {
@@ -290,6 +290,40 @@ describe('邮件告警', () => {
     await db.query("INSERT INTO alert_rules (name, metric, period, tiers, notify_admins, extra_emails, created_at) VALUES ('r', 'cost', 'daily', '{50}', false, '{Finance@Example.com}', '2020-01-01')");
     await collect(db, fakeExecutor(() => report({ '2026-09-19': [opus(1, 60)] })), targetA, NOW);
     expect((await outbox(db)).map((m) => m.to_addrs)).toEqual([['finance@example.com']]);
+  });
+
+  it('按数据源设阈值 + 单独规则优先于全局：共享账户 Codex/Claude 任一超 200 才提醒，其他人合计超 100 就提醒', async () => {
+    const chat = await addUser(db, '聊天');
+    const chatClaude = await addTarget(db, serverA, chat, '/data/ai/.claude');
+    const chatCodex = await addTarget(db, serverA, chat, '/data/ai/.codex');
+    await db.query("UPDATE collection_targets SET source = 'codex' WHERE id = $1", [chatCodex]);
+    const rule = (name: string, tier: number, scope: string, user: string | null, source: string | null) => db.query(
+      `INSERT INTO alert_rules (name, metric, period, tiers, scope_type, scope_user_id, source, notify_admins, extra_emails, created_at)
+       VALUES ($1, 'cost', 'daily', $2, $3, $4, $5, false, '{zyt@example.com}', '2020-01-01')`, [name, [tier], scope, user, source]);
+    await rule('单用户日费用', 100, 'global', null, null);
+    await rule('聊天 Claude 日费用', 200, 'user', chat, 'claude-code');
+    await rule('聊天 Codex 日费用', 200, 'user', chat, 'codex');
+    const codexReport = (cost: number) => ({ daily: [{ date: '2026-09-19', totalTokens: 10, costUSD: cost, models: { 'gpt-5': { totalTokens: 10 } } }] });
+
+    // 聊天：Claude 150 + Codex 180 = 330，合计早已超过 100 和 200，但单项都没到 200，且全局的 100 不适用于它 → 不提醒
+    await collect(db, fakeExecutor(() => report({ '2026-09-19': [opus(1, 150)] })), chatClaude, NOW);
+    await collect(db, fakeExecutor(() => codexReport(180)), chatCodex, NOW);
+    expect(await outbox(db)).toHaveLength(0);
+
+    // Codex 涨到 209.88 → 只触发 Codex 那条
+    await collect(db, fakeExecutor(() => codexReport(209.88)), chatCodex, at('2026-09-19 16:00'));
+    // 普通用户 zhangsan：合计 120 > 100 → 触发全局规则
+    await collect(db, fakeExecutor(() => report({ '2026-09-19': [opus(1, 120)] })), targetA, at('2026-09-19 16:00'));
+
+    const mails = await outbox(db);
+    expect(mails.map((m) => [m.to_addrs, m.subject])).toEqual([
+      [['zyt@example.com'], '[用量提醒] 聊天 当日 Codex 估算费用 US$ 209.88，已超过 US$ 200.00'],
+      [['zyt@example.com'], '[用量提醒] zhangsan 当日估算费用 US$ 120.00，已超过 US$ 100.00'],
+    ]);
+    expect(mails[0].body_text).toContain('用户：聊天');
+    expect(mails[0].body_text).toContain('数据范围：Codex');
+    expect(mails[0].body_text).toContain('超出：US$ 9.88');
+    expect((await db.query("SELECT source FROM alert_events WHERE user_id = $1", [chat])).rows).toEqual([{ source: 'codex' }]);
   });
 
   it('团队与用户范围的规则只作用于对应用户', async () => {
