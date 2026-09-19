@@ -224,3 +224,10 @@ describe('请求体', () => {
     expect(res.statusCode).toBe(200);
   });
 });
+
+describe('登录输入', () => {
+  it('邮箱首尾的空白（复制粘贴带入）不影响登录', async () => {
+    const res = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { email: ' admin@example.com ', password: PASSWORD } });
+    expect(res.statusCode).toBe(200);
+  });
+});

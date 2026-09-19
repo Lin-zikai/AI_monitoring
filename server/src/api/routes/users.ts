@@ -10,7 +10,7 @@ import { passwordSchema } from './auth.js';
 const budget = z.number().nonnegative().max(1e9).nullable();
 const createSchema = z.object({
   name: z.string().trim().min(1).max(100),
-  email: z.string().email().max(320),
+  email: z.string().trim().email().max(320),
   role: z.enum(['admin', 'user']).default('user'),
   team: z.string().trim().min(1).max(100).nullable().default(null),
   monthlyBudgetUsd: budget.default(null),
@@ -18,7 +18,7 @@ const createSchema = z.object({
 });
 const patchSchema = z.object({
   name: z.string().trim().min(1).max(100),
-  email: z.string().email().max(320),
+  email: z.string().trim().email().max(320),
   role: z.enum(['admin', 'user']),
   team: z.string().trim().min(1).max(100).nullable(),
   monthlyBudgetUsd: budget,

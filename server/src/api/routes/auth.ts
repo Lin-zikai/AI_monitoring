@@ -11,7 +11,7 @@ export async function authRoutes(app: FastifyInstance, ctx: RouteContext): Promi
   const { db } = ctx;
 
   app.post('/auth/login', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
-    const body = parse(z.object({ email: z.string().email().max(320), password: z.string().min(1).max(200) }), req.body);
+    const body = parse(z.object({ email: z.string().trim().email().max(320), password: z.string().min(1).max(200) }), req.body);
     const user = (await db.query('SELECT id, email, name, role, password_hash, is_active FROM users WHERE lower(email) = lower($1)', [body.email])).rows[0];
     // 无论账户是否存在都执行一次哈希校验，避免通过响应时间探测邮箱
     const ok = await verifyPassword(body.password, user?.password_hash ?? 'scrypt$32768$8$1$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=');

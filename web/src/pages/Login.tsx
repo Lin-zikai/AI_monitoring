@@ -38,7 +38,7 @@ export function LoginPage() {
         <Typography.Paragraph type="secondary" style={{ textAlign: 'center' }}>基于 ccusage 的多用户用量统计与告警</Typography.Paragraph>
         {error && <Alert type="error" showIcon title={error} style={{ marginBottom: 16 }} />}
         <Form layout="vertical" onFinish={submit} requiredMark={false}>
-          <Form.Item name="email" label="邮箱" rules={[{ required: true, type: 'email', message: '请输入有效的邮箱' }]}>
+          <Form.Item name="email" label="邮箱" normalize={(v?: string) => v?.trim()} rules={[{ required: true, type: 'email', message: '请输入有效的邮箱' }]}>
             <Input prefix={<MailOutlined />} autoComplete="username" autoFocus />
           </Form.Item>
           <Form.Item name="password" label="密码" rules={[{ required: true, message: '请输入密码' }]}>

@@ -50,6 +50,19 @@ ssh root@server-a 'cd /tmp/usage-remote && ./install.sh "ssh-ed25519 AAAA... usa
 
 无法集中授权时，可以不建专用账户：把同一行 `command="…",restrict <公钥>` 加到用户自己的 `~/.ssh/authorized_keys`，并在平台的采集目标上覆盖 SSH 用户名（必要时覆盖凭据）。
 
+### 没有 root 时：只采集自己的账户
+
+`/etc/ccusage-collect/config.json` 写不了时，把脚本和配置放在自己的家目录，并在 forced command 里指明配置路径与 PATH（非交互 SSH 会话通常不加载 `.bashrc`）：
+
+```bash
+npm i -g ccusage@20.0.23
+install -m 0755 remote/ccusage-collect.mjs ~/.local/bin/ccusage-collect
+mkdir -p ~/.config/ccusage-collect    # config.json：allowedDirs 只放自己的 ~/.claude，ccusageBin 写绝对路径
+echo 'command="PATH=<ccusage 所在目录>:/usr/bin:/bin CCUSAGE_COLLECT_CONFIG=<家目录>/.config/ccusage-collect/config.json /usr/bin/node <家目录>/.local/bin/ccusage-collect",restrict <公钥>' >> ~/.ssh/authorized_keys
+```
+
+平台上添加服务器时 SSH 用户名填自己的账户名，采集命令保持 `ccusage-collect`（forced command 下命令名只是占位）。
+
 **隐私说明**：采集账户对会话日志有读权限（ccusage 需要读取它们），但采集脚本只向平台输出按日、按模型的 Token 与费用统计，不上传提示词、回答或会话内容。
 
 **费用口径**：`config.json` 的 `costMode`（`auto`/`calculate`/`display`）与 `offline` 决定估算费用的计算方式，平台会把 ccusage 版本与计价模式随每行统计一起记录（`price_version`）。各服务器应保持同一版本与同一配置；升级 ccusage 时同步修改 `expectedCcusageVersion`，版本不符时采集会明确失败而不是混入不同口径的数据。

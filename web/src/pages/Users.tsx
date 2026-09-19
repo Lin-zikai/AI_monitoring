@@ -95,7 +95,7 @@ export function UsersPage() {
       <Modal title={editing === 'new' ? '新增用户' : '编辑用户'} open={editing !== null} onOk={submit} confirmLoading={saving} onCancel={() => setEditing(null)} destroyOnHidden>
         <Form form={form} layout="vertical" autoComplete="off">
           <Form.Item name="name" label="姓名" rules={[{ required: true, message: '请输入姓名' }]}><Input maxLength={100} /></Form.Item>
-          <Form.Item name="email" label="邮箱（登录名与告警收件地址）" rules={[{ required: true, type: 'email', message: '请输入有效的邮箱' }]}><Input maxLength={320} /></Form.Item>
+          <Form.Item name="email" label="邮箱（登录名与告警收件地址）" normalize={(v?: string) => v?.trim()} rules={[{ required: true, type: 'email', message: '请输入有效的邮箱' }]}><Input maxLength={320} /></Form.Item>
           <Space size={16} style={{ display: 'flex' }} align="start">
             <Form.Item name="role" label="角色" style={{ width: 140 }}>
               <Select options={[{ value: 'user', label: '普通用户' }, { value: 'admin', label: '管理员' }]} disabled={editing !== 'new' && editing?.id === me?.id} />
