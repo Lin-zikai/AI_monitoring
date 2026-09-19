@@ -18,7 +18,8 @@ export interface ExecResult { stdout: string; stderr: string; exitCode: number |
 
 /** 采集流程依赖的远程执行接口，测试中可替换。 */
 export interface RemoteExecutor {
-  exec(target: SshTarget, command: string, timeoutMs: number): Promise<ExecResult>;
+  /** stdin：写入远端命令标准输入的内容（用于把固定的安装脚本交给 `sh -s`） */
+  exec(target: SshTarget, command: string, timeoutMs: number, stdin?: string): Promise<ExecResult>;
 }
 
 const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
@@ -47,7 +48,7 @@ function mapSshError(err: Error & { level?: string; code?: string }): CollectErr
 }
 
 export const sshExecutor: RemoteExecutor = {
-  exec(target, command, timeoutMs) {
+  exec(target, command, timeoutMs, stdin) {
     return new Promise((resolve, reject) => {
       const conn = new Client();
       let settled = false;
@@ -73,8 +74,9 @@ export const sshExecutor: RemoteExecutor = {
             out.push(chunk);
           });
           stream.stderr.on('data', (chunk: Buffer) => {
-            if (errOut.length < 64) errOut.push(chunk);
+            if (errOut.length < 512) errOut.push(chunk);
           });
+          if (stdin !== undefined) stream.end(stdin);
           stream.on('close', (code: number | null) => {
             done(null, { stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(errOut).toString('utf8'), exitCode: code });
           });

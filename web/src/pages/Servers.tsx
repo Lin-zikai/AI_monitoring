@@ -16,6 +16,8 @@ const { Text, Paragraph } = Typography;
 
 // ---------------------------------------------------------------- 凭据
 
+const INSTALL_NOTE = '平台会用这台服务器的 SSH 账户登录，在其家目录的 ~/.local/share/usage-monitor/ 下安装：Node.js（远端没有 20+ 版本时自动下载并校验）、固定版本的 ccusage 和采集脚本。不需要 root，不改动系统目录；要求该密钥在远端有普通 shell 权限，且远端能访问外网。';
+
 const MAX_KEY_FILE_BYTES = 20_000;
 
 /** 私钥是否带口令保护（只看明文头部，不涉及密钥内容）。 */
@@ -539,12 +541,38 @@ export function ServersPage() {
   const testServer = async (s: Server) => {
     setTesting(s.id);
     try {
-      const r = await api.post<{ ok: boolean; message?: string; code?: string; collectorVersion?: string | null }>(`/servers/${s.id}/test`);
+      const r = await api.post<{ ok: boolean; stage?: 'ssh' | 'collector'; message?: string; code?: string; collectorVersion?: string | null }>(`/servers/${s.id}/test`);
       if (r.ok) message.success(`连接成功，采集脚本版本 ${r.collectorVersion ?? '未知'}`);
-      else modal.error({ title: '连接测试未通过', content: `${r.code ? `${r.code}：` : ''}${r.message ?? ''}` });
+      else if (r.stage === 'collector') {
+        // SSH 本身没问题，只是远端还没装采集组件：直接给出自动安装入口
+        modal.confirm({ title: '已连接，但远端还没有采集组件', okText: '自动安装', cancelText: '稍后', content: INSTALL_NOTE, onOk: () => { void installCollector(s); } });
+      } else modal.error({ title: '连接测试未通过', content: `${r.code ? `${r.code}：` : ''}${r.message ?? ''}` });
       servers.reload();
     } catch (err) { message.error(errorMessage(err)); } finally { setTesting(null); }
   };
+
+  const installCollector = async (s: Server) => {
+    const progress = modal.info({ title: `正在 ${s.name} 上安装采集组件…`, content: '通过 SSH 下载并安装，通常需要 10 秒到几分钟，请不要关闭页面。', okButtonProps: { loading: true, disabled: true }, okText: '安装中', keyboard: false, maskClosable: false });
+    try {
+      const r = await api.post<{ ok: boolean; code?: string; message?: string; collectCommand?: string; nodeVersion?: string; ccusageVersion?: string; defaultDataDir?: string }>(`/servers/${s.id}/install-collector`);
+      progress.destroy();
+      if (r.ok) {
+        modal.success({
+          title: '采集组件安装完成',
+          content: (
+            <div>
+              <Paragraph>ccusage {r.ccusageVersion}，Node {r.nodeVersion}。采集命令已自动登记为：</Paragraph>
+              <Paragraph><Text code>{r.collectCommand}</Text></Paragraph>
+              <Paragraph style={{ marginBottom: 0 }}>下一步：展开该服务器“添加采集目标”。该账户自己的数据目录一般是 <Text code copyable>{r.defaultDataDir}</Text></Paragraph>
+            </div>
+          ),
+        });
+      } else modal.error({ title: '自动安装未成功', width: 640, content: <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12, margin: 0 }}>{`${r.code ? `${r.code}：` : ''}${r.message ?? ''}`}</pre> });
+      servers.reload();
+    } catch (err) { progress.destroy(); message.error(errorMessage(err)); }
+  };
+
+  const confirmInstall = (s: Server) => modal.confirm({ title: `在“${s.name}”上安装 / 更新采集组件？`, okText: '开始安装', content: INSTALL_NOTE, onOk: () => { void installCollector(s); } });
 
   const testTarget = async (t: Target) => {
     setTesting(t.id);
@@ -644,6 +672,7 @@ export function ServersPage() {
               <Dropdown menu={{
                 items: [
                   { key: 'hostkey', label: '主机指纹', onClick: () => setHostKeyFor(s) },
+                  { key: 'install', label: '安装 / 更新采集组件', disabled: !s.hostKeyFingerprint, onClick: () => confirmInstall(s) },
                   { key: 'toggle', label: s.enabled ? '停用' : '启用', onClick: () => void toggle('servers', s.id, !s.enabled) },
                   { type: 'divider' },
                   { key: 'delete', danger: true, label: '删除', onClick: () => remove('servers', s.id, s.name) },

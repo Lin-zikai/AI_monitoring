@@ -16,7 +16,7 @@ import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-const COLLECTOR_VERSION = '1.0.0';
+const COLLECTOR_VERSION = '1.1.0';
 const CONFIG_PATH = process.env.CCUSAGE_COLLECT_CONFIG || '/etc/ccusage-collect/config.json';
 const SAFE_PATH = /^\/[A-Za-z0-9._@+\-/]*$/;
 const SOURCES = { 'claude-code': { subcommand: 'claude', dirEnv: 'CLAUDE_CONFIG_DIR', logRoot: 'projects' } };
@@ -55,6 +55,7 @@ function normalizeDate(value) {
 
 function dirAllowed(realDir, patterns) {
   return patterns.some((pattern) => {
+    if (pattern === '**') return true; // 平台自动安装的场景：账户本身有 shell 权限，白名单不构成边界
     if (typeof pattern !== 'string' || !pattern.startsWith('/')) return false;
     // 仅支持 * 通配单个路径段，例如 /home/*/.claude
     const re = new RegExp(`^${pattern.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^/]+')}$`);

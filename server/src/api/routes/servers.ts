@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { CollectError, collectEnvelope, parseEnvelope, supportedSources } from '../../collect/adapter.js';
 import { buildCollectCommand } from '../../collect/command.js';
+import { installCollector } from '../../collect/install.js';
 import { createAdhocBatch } from '../../collect/scheduler.js';
 import { withTx } from '../../db/pool.js';
 import { sanitizeError } from '../../logger.js';
@@ -243,13 +244,28 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
       const result = await ctx.executor.exec(ssh, collectCommand, 30_000);
       let envelope: ReturnType<typeof collectEnvelope.safeParse> | undefined;
       try { envelope = collectEnvelope.safeParse(JSON.parse(result.stdout)); } catch { /* 非 JSON 输出 */ }
-      if (!envelope?.success) return { ok: false, stage: 'collector', message: '已连接并通过认证，但远端未返回采集脚本的应答；请确认已安装 ccusage-collect' };
+      if (!envelope?.success) return { ok: false, stage: 'collector', message: '已连接并通过认证，但远端还没有安装采集组件。可以点“自动安装采集组件”由平台通过 SSH 安装。' };
       await db.query('UPDATE servers SET last_connect_ok_at = now(), last_error = NULL WHERE id = $1', [id]);
       return { ok: true, collectorVersion: envelope.data.collectorVersion ?? null };
     } catch (err) {
       const message = sanitizeError(err);
       await db.query('UPDATE servers SET last_error = $2 WHERE id = $1', [id, message]);
       return { ok: false, stage: 'ssh', code: err instanceof CollectError ? err.code : 'ERROR', message };
+    }
+  });
+
+  /** 自动安装采集组件：在远端账户家目录下安装 Node（如缺）、固定版本 ccusage 与采集脚本，并登记采集命令。 */
+  app.post('/servers/:id/install-collector', admin, async (req) => {
+    const { id } = parse(idParam, req.params);
+    const { ssh } = await loadSshTarget(id);
+    try {
+      const result = await installCollector(ctx.executor, ssh);
+      await db.query('UPDATE servers SET collect_command = $2, last_connect_ok_at = now(), last_error = NULL, updated_at = now() WHERE id = $1', [id, result.collectCommand]);
+      await audit(db, req, 'server.install_collector', 'server', id, { collectCommand: result.collectCommand, nodeVersion: result.nodeVersion, ccusageVersion: result.ccusageVersion });
+      return { ok: true, ...result };
+    } catch (err) {
+      await audit(db, req, 'server.install_collector_failed', 'server', id, { message: sanitizeError(err) });
+      return { ok: false, code: err instanceof CollectError ? err.code : 'ERROR', message: err instanceof Error ? err.message.slice(0, 1500) : String(err) };
     }
   });
 

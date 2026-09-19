@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +7,7 @@ import ssh2 from 'ssh2';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { claudeCodeAdapter, parseEnvelope } from '../src/collect/adapter.js';
 import { buildCollectCommand } from '../src/collect/command.js';
+import { installCollector } from '../src/collect/install.js';
 import { hostKeyFingerprint, scanHostKey, sshExecutor, type SshTarget } from '../src/ssh/client.js';
 import { report } from './helpers.js';
 
@@ -113,5 +114,64 @@ describe('SSH 采集链路', () => {
 
   it('扫描主机指纹供管理员核对', async () => {
     expect(await scanHostKey(target.host, target.port)).toBe(target.expectedHostFingerprint);
+  });
+});
+
+describe('自动安装采集组件', () => {
+  let shellServer: ssh2.Server;
+  let shellTarget: SshTarget;
+  let home: string;
+
+  beforeAll(async () => {
+    home = mkdtempSync(join(tmpdir(), 'usage-monitor-home-'));
+    mkdirSync(join(home, '.claude', 'projects', 'demo'), { recursive: true });
+    writeFileSync(join(home, '.claude', 'projects', 'demo', 's.jsonl'), '{}\n');
+    // 本地假 ccusage 包：安装过程不依赖外网
+    const pkg = join(home, 'fake-ccusage');
+    mkdirSync(pkg);
+    writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: 'ccusage', version: '20.0.23', bin: { ccusage: 'cli.js' } }));
+    const sample = JSON.stringify(report({ '2026-09-19': [{ model: 'claude-opus-5', input: 10, cost: 0.01 }] }));
+    writeFileSync(join(pkg, 'cli.js'), `#!/usr/bin/env node\nconsole.log(process.argv[2] === '--version' ? 'ccusage 20.0.23' : ${JSON.stringify(sample)});\n`);
+    chmodSync(join(pkg, 'cli.js'), 0o755);
+
+    // 一个有普通 shell 权限的账户：按客户端给的命令执行（含 `sh -s` + 标准输入）
+    shellServer = new ssh2.Server({ hostKeys: [hostKey.private] }, (client) => {
+      client.on('authentication', (ctx) => (ctx.method === 'publickey' && ctx.key.data.equals(clientPublic.getPublicSSH()) ? ctx.accept() : ctx.reject(['publickey'])));
+      client.on('ready', () => client.on('session', (accept) => accept().on('exec', (acceptExec, _r, info) => {
+        const stream = acceptExec();
+        const child = spawn('sh', ['-c', info.command], { env: { PATH: process.env.PATH, HOME: home } });
+        stream.pipe(child.stdin);
+        child.stdout.on('data', (c) => stream.write(c));
+        child.stderr.on('data', (c) => stream.stderr.write(c));
+        child.on('close', (code) => { stream.exit(code ?? 1); stream.end(); });
+      })));
+      client.on('error', () => undefined);
+    });
+    const port = await new Promise<number>((resolve) => shellServer.listen(0, '127.0.0.1', () => resolve((shellServer.address() as { port: number }).port)));
+    shellTarget = { ...target, port };
+  });
+
+  afterAll(() => {
+    shellServer.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('经 SSH 安装后，用登记的采集命令即可采集', async () => {
+    const result = await installCollector(sshExecutor, shellTarget, { ccusageSpec: process.env.E2E_REAL_CCUSAGE ? undefined : join(home, 'fake-ccusage'), timeoutMs: 300_000 });
+    if (process.env.E2E_REAL_CCUSAGE) { console.log('REAL INSTALL', result.nodeVersion, result.ccusageVersion, result.log.split('\n').slice(-3).join(' / ')); return; }
+    expect(result).toMatchObject({ collectCommand: `${home}/.local/share/usage-monitor/ccusage-collect`, ccusageVersion: '20.0.23', defaultDataDir: `${home}/.claude` });
+
+    const req = request(join(home, '.claude'));
+    const out = await sshExecutor.exec(shellTarget, buildCollectCommand(result.collectCommand, req), 20_000);
+    const envelope = parseEnvelope(out.stdout, req);
+    expect(envelope).toMatchObject({ collectorVersion: '1.1.0', ccusageVersion: '20.0.23' });
+    expect(claudeCodeAdapter.parse(envelope.report)[0]).toMatchObject({ model: 'claude-opus-5', totalTokens: 10 });
+
+    // 重复安装（升级）是幂等的
+    expect((await installCollector(sshExecutor, shellTarget, { ccusageSpec: join(home, 'fake-ccusage'), timeoutMs: 120_000 })).collectCommand).toBe(result.collectCommand);
+  }, 180_000);
+
+  it('密钥被 forced command 限制时给出明确说明，而不是笼统的失败', async () => {
+    await expect(installCollector(sshExecutor, target, { timeoutMs: 30_000 })).rejects.toMatchObject({ code: 'KEY_RESTRICTED' });
   });
 });

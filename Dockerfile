@@ -21,6 +21,7 @@ COPY --from=server-build /app/server/node_modules ./node_modules
 COPY --from=server-build /app/server/dist ./dist
 COPY server/package.json ./
 COPY server/migrations ./migrations
+COPY remote /app/remote
 COPY --from=web /app/web/dist /app/web/dist
 USER node
 EXPOSE 3000

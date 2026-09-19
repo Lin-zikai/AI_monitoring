@@ -28,6 +28,17 @@ docker compose logs -f api collector mailer
 
 ## 3. 被采集服务器
 
+有两种接入方式：
+
+| | 自动安装（省事） | 手工安装受限账户（更安全，方案推荐） |
+| --- | --- | --- |
+| 做法 | 平台上添加服务器 → 确认指纹 → “测试连接”提示未安装时点“自动安装”（或“更多 → 安装 / 更新采集组件”） | 按下文用 root 执行 `remote/install.sh` |
+| 前提 | 该 SSH 密钥在远端有普通 shell 权限；远端能访问外网（nodejs.org / npm 源，或其国内镜像） | root 权限 |
+| 装到哪里 | 该账户的 `~/.local/share/usage-monitor/`（Node 如缺则自动下载并校验 SHA256、`ccusage@20.0.23`、采集脚本），约 170 MB | `/usr/local/bin`、`/etc/ccusage-collect` |
+| 密钥权限 | 密钥本身能登录 shell——密钥泄露等同于该账户泄露，建议仍使用专用账户与专用密钥 | 密钥被 `command="…",restrict` 锁定，只能运行采集脚本 |
+
+下面是手工安装的步骤。
+
 每台服务器执行一次（需要 root 与 Node.js ≥ 20）：
 
 ```bash
