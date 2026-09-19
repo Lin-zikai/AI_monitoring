@@ -53,6 +53,7 @@ export interface Overview {
   totals: Totals;
   trend: { from: string; to: string; rows: Array<{ date: string; model: string; totalTokens: NumLike; costUsd: number | null }> };
   models: Array<{ model: string; totalTokens: NumLike; costUsd: number | null }>;
+  todayRanking: Array<{ userId: string; name: string; team: string | null; claudeTokens: NumLike; claudeCost: number | null; codexTokens: NumLike; codexCost: number | null; totalTokens: NumLike; totalCost: number | null }>;
   ranking: Array<{ userId: string; name: string; team: string | null; monthlyBudgetUsd: number | null; monthTokens: NumLike; monthCost: number | null; todayTokens: NumLike }>;
   issues: Issue[];
 }

@@ -158,6 +158,26 @@ describe('凭据管理', () => {
   });
 });
 
+describe('总览仪表盘', () => {
+  it('今日排名按 Claude Code / Codex 分列并给出合计；普通用户看不到排名', async () => {
+    const day = (await get('/api/meta', adminCookie)).json().today as string;
+    const server = (await db.query('SELECT id FROM servers LIMIT 1')).rows[0].id;
+    const wang = await addUser(db, 'wang');
+    const claude = await addTarget(db, server, wang, '/home/wang/.claude');
+    const codex = await addTarget(db, server, wang, '/home/wang/.codex');
+    await db.query("UPDATE collection_targets SET source = 'codex' WHERE id = $1", [codex]);
+    const insert = `INSERT INTO usage_daily (target_id, user_id, server_id, source, usage_date, model, total_tokens, cost_usd, timezone, parser_version, collected_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Asia/Shanghai', 't', now())`;
+    await db.query(insert, [claude, wang, server, 'claude-code', day, 'claude-opus-5', 3000, 1.5]);
+    await db.query(insert, [codex, wang, server, 'codex', day, 'gpt-5', 500, 0.25]);
+
+    const row = (await get('/api/stats/overview', adminCookie)).json().todayRanking.find((r: { name: string }) => r.name === 'wang');
+    expect(row).toMatchObject({ claudeTokens: 3000, claudeCost: 1.5, codexTokens: 500, codexCost: 0.25, totalTokens: 3500, totalCost: 1.75 });
+    expect((await get('/api/stats/overview', zhangsanCookie)).json().todayRanking).toEqual([]);
+    await db.query('DELETE FROM usage_daily WHERE user_id = $1', [wang]);
+  });
+});
+
 describe('管理操作', () => {
   it('用户列表带今日/本月用量；没有用量的用户显示为未知（null）而不是 0', async () => {
     const res = await get('/api/users', adminCookie);

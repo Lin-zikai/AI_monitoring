@@ -11,10 +11,35 @@ import type { Overview } from '../types';
 export const METRIC_OPTIONS = [{ label: 'Token', value: 'tokens' }, { label: '估算费用', value: 'cost' }];
 export const DAYS_OPTIONS = [{ label: '近 7 天', value: 7 }, { label: '近 30 天', value: 30 }, { label: '近 90 天', value: 90 }];
 
+type RankBy = 'total' | 'claude' | 'codex';
+const RANK_OPTIONS = [{ label: '合计费用', value: 'total' }, { label: 'Claude Code', value: 'claude' }, { label: 'Codex', value: 'codex' }];
+type TodayRow = Overview['todayRanking'][number];
+const RANK_KEYS: Record<RankBy, { cost: keyof TodayRow; tokens: keyof TodayRow }> = {
+  total: { cost: 'totalCost', tokens: 'totalTokens' }, claude: { cost: 'claudeCost', tokens: 'claudeTokens' }, codex: { cost: 'codexCost', tokens: 'codexTokens' },
+};
+
+// 某个数据源当天没有任何记录时显示“—”（没有用量）；有记录但数值缺失才是“未知”
+const SourceTokens = ({ value }: { value: TodayRow['claudeTokens'] }) => (value === null || value === undefined ? <Typography.Text type="secondary">—</Typography.Text> : <TokenCell value={value} />);
+const SourceCost = ({ value, tokens }: { value: number | null; tokens: TodayRow['claudeTokens'] }) => (tokens === null || tokens === undefined ? <Typography.Text type="secondary">—</Typography.Text> : <CostCell value={value} />);
+
 export function DashboardPage() {
+  const [rankBy, setRankBy] = useState<RankBy>('total');
   const [days, setDays] = useState(30);
   const [metric, setMetric] = useState<ChartMetric>('tokens');
   const { data, loading, error } = useFetch(() => api.get<Overview>('/stats/overview', { days }), [days]);
+
+  const todayAll = data?.todayRanking ?? [];
+  // 按所选口径（合计 / Claude Code / Codex）排序取前 10：先比估算费用，再比 Token；该口径下没有用量的人不入榜
+  const todayTop = useMemo(() => {
+    const k = RANK_KEYS[rankBy];
+    const val = (r: TodayRow, key: keyof TodayRow) => num(r[key] as TodayRow['totalTokens']) ?? -1;
+    return todayAll.filter((r) => r[k.tokens] !== null || r[k.cost] !== null)
+      .sort((a, b) => val(b, k.cost) - val(a, k.cost) || val(b, k.tokens) - val(a, k.tokens)).slice(0, 10);
+  }, [todayAll, rankBy]);
+  const todaySum = useMemo(() => {
+    const add = (key: keyof TodayRow) => { const vals = todayAll.map((r) => num(r[key] as TodayRow['totalTokens'])).filter((v): v is number => v !== null); return vals.length ? vals.reduce((a, b) => a + b, 0) : null; };
+    return { claudeTokens: add('claudeTokens'), claudeCost: add('claudeCost'), codexTokens: add('codexTokens'), codexCost: add('codexCost'), totalTokens: add('totalTokens'), totalCost: add('totalCost') };
+  }, [todayAll]);
 
   const trendPoints = useMemo(() => (data?.trend.rows ?? []).map((r) => ({
     date: r.date, seriesKey: r.model, seriesLabel: r.model, value: metric === 'cost' ? r.costUsd : num(r.totalTokens),
@@ -56,6 +81,44 @@ export function DashboardPage() {
           </Card>
         </Col>
       </Row>
+
+      <Card
+        title={`今日用量排名 Top 10（${data?.freshness.today ?? ''}）`} size="small" style={{ marginTop: 16 }}
+        extra={<Space size={8}><Typography.Text type="secondary">排名依据</Typography.Text><Segmented size="small" value={rankBy} onChange={(v) => setRankBy(v as RankBy)} options={RANK_OPTIONS} /></Space>}
+      >
+        <Table
+          size="small" rowKey="userId" pagination={false} dataSource={todayTop} loading={first} scroll={{ x: 820 }}
+          locale={{ emptyText: '今日还没有用量' }}
+          columns={[
+            { title: '#', width: 40, render: (_v, _r, i) => i + 1 },
+            { title: '用户', render: (_v, r) => <Link to={`/users/${r.userId}`}>{r.name}</Link> },
+            { title: '团队', dataIndex: 'team', render: (v: string | null) => v ?? <Typography.Text type="secondary">未分组</Typography.Text> },
+            { title: 'Claude Code', children: [
+              { title: 'Token', align: 'right', render: (_v, r) => <SourceTokens value={r.claudeTokens} /> },
+              { title: '估算费用', align: 'right', render: (_v, r) => <SourceCost value={r.claudeCost} tokens={r.claudeTokens} /> },
+            ] },
+            { title: 'Codex', children: [
+              { title: 'Token', align: 'right', render: (_v, r) => <SourceTokens value={r.codexTokens} /> },
+              { title: '估算费用', align: 'right', render: (_v, r) => <SourceCost value={r.codexCost} tokens={r.codexTokens} /> },
+            ] },
+            { title: '合计', children: [
+              { title: 'Token', align: 'right', render: (_v, r) => <TokenCell value={r.totalTokens} /> },
+              { title: '估算费用', align: 'right', render: (_v, r) => <Typography.Text strong><CostCell value={r.totalCost} /></Typography.Text> },
+            ] },
+          ]}
+          summary={() => (todayAll.length === 0 ? null : (
+            <Table.Summary.Row style={{ background: '#fafafa' }}>
+              <Table.Summary.Cell index={0} colSpan={3}><Typography.Text strong>今日全员合计（{todayAll.length} 人）</Typography.Text></Table.Summary.Cell>
+              <Table.Summary.Cell index={3} align="right"><SourceTokens value={todaySum.claudeTokens} /></Table.Summary.Cell>
+              <Table.Summary.Cell index={4} align="right"><SourceCost value={todaySum.claudeCost} tokens={todaySum.claudeTokens} /></Table.Summary.Cell>
+              <Table.Summary.Cell index={5} align="right"><SourceTokens value={todaySum.codexTokens} /></Table.Summary.Cell>
+              <Table.Summary.Cell index={6} align="right"><SourceCost value={todaySum.codexCost} tokens={todaySum.codexTokens} /></Table.Summary.Cell>
+              <Table.Summary.Cell index={7} align="right"><TokenCell value={todaySum.totalTokens} /></Table.Summary.Cell>
+              <Table.Summary.Cell index={8} align="right"><Typography.Text strong><CostCell value={todaySum.totalCost} /></Typography.Text></Table.Summary.Cell>
+            </Table.Summary.Row>
+          ))}
+        />
+      </Card>
 
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} xl={14}>

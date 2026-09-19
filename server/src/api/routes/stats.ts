@@ -121,7 +121,7 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
     const trendFrom = addDays(today, -(q.days - 1));
     const scope = '($1::uuid IS NULL OR d.user_id = $1)';
 
-    const [totals, trend, models, ranking, issues] = await Promise.all([
+    const [totals, trend, models, ranking, todayRanking, issues] = await Promise.all([
       db.query(
         `SELECT sum(d.total_tokens) FILTER (WHERE d.usage_date = $2)::bigint AS "todayTokens", sum(d.cost_usd) FILTER (WHERE d.usage_date = $2)::float8 AS "todayCost",
                 sum(d.total_tokens)::bigint AS "monthTokens", sum(d.cost_usd)::float8 AS "monthCost",
@@ -149,6 +149,18 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
           [today, month.first, month.last],
         )
         : Promise.resolve({ rows: [] }),
+      // 今日排名：按数据源分列（Claude Code / Codex）并给出合计；返回当日全部有用量的用户，由前端按所选口径取前 10
+      me.role === 'admin'
+        ? db.query(
+          `SELECT u.id AS "userId", u.name, u.team,
+                  sum(d.total_tokens) FILTER (WHERE d.source = 'claude-code')::bigint AS "claudeTokens", sum(d.cost_usd) FILTER (WHERE d.source = 'claude-code')::float8 AS "claudeCost",
+                  sum(d.total_tokens) FILTER (WHERE d.source = 'codex')::bigint AS "codexTokens", sum(d.cost_usd) FILTER (WHERE d.source = 'codex')::float8 AS "codexCost",
+                  sum(d.total_tokens)::bigint AS "totalTokens", sum(d.cost_usd)::float8 AS "totalCost"
+             FROM usage_daily d JOIN users u ON u.id = d.user_id WHERE d.usage_date = $1
+            GROUP BY u.id ORDER BY "totalCost" DESC NULLS LAST, "totalTokens" DESC NULLS LAST LIMIT 500`,
+          [today],
+        )
+        : Promise.resolve({ rows: [] }),
       db.query(
         `SELECT t.id AS "targetId", s.name AS "serverName", t.data_dir AS "dataDir", u.name AS "userName", t.last_status AS "lastStatus",
                 t.last_error_code AS "lastErrorCode", t.last_error AS "lastError", t.last_success_at AS "lastSuccessAt", t.consecutive_failures AS "consecutiveFailures"
@@ -167,6 +179,7 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
       trend: { from: trendFrom, to: today, rows: trend.rows },
       models: models.rows,
       ranking: ranking.rows,
+      todayRanking: todayRanking.rows,
       // 普通用户只看到“我的来源有异常”，不暴露错误细节里的服务器信息
       issues: me.role === 'admin' ? issues.rows : issues.rows.map((i) => ({ targetId: i.targetId, serverName: i.serverName, lastSuccessAt: i.lastSuccessAt, lastStatus: i.lastStatus })),
     };
