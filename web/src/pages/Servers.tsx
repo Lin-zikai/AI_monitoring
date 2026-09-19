@@ -148,20 +148,39 @@ function CredentialsTab({ credentials, loading, reload }: { credentials: Credent
 
 interface ServerForm { name: string; host: string; port: number; sshUsername: string; credentialId: string; collectCommand: string; enabled: boolean }
 
-function ServerModal({ editing, credentials, onClose, onSaved }: { editing: Server | 'new' | null; credentials: Credential[]; onClose: () => void; onSaved: () => void }) {
-  const [form] = Form.useForm<ServerForm>();
+type ServerFormValues = ServerForm & { credentialName?: string; privateKey?: string; passphrase?: string };
+
+function ServerModal({ editing, credentials, onClose, onSaved, onCredentialCreated }: { editing: Server | 'new' | null; credentials: Credential[]; onClose: () => void; onSaved: () => void; onCredentialCreated: () => void }) {
+  const [form] = Form.useForm<ServerFormValues>();
   const [saving, setSaving] = useState(false);
   const { message } = App.useApp();
+
+  // 凭据来源：选已有的，或直接在这里录入新密钥（先创建凭据，再创建/更新服务器）
+  const [credMode, setCredMode] = useState<'existing' | 'new'>('existing');
+  const usable = credentials.filter((c) => !c.revokedAt);
 
   const submit = async () => {
     const v = await form.validateFields();
     setSaving(true);
     try {
+      let credentialId = v.credentialId;
+      if (credMode === 'new') {
+        const created = await api.post<{ id: string; publicFingerprint: string }>('/credentials', {
+          name: v.credentialName?.trim() || `${v.name} 密钥`, privateKey: v.privateKey, ...(v.passphrase ? { passphrase: v.passphrase } : {}),
+        });
+        credentialId = created.id;
+        // 密钥已入库：立刻切回“已有凭据”并清掉明文，后续步骤失败重试时不会重复创建
+        form.setFieldsValue({ credentialId, privateKey: undefined, passphrase: undefined, credentialName: undefined });
+        setCredMode('existing');
+        onCredentialCreated();
+        message.success(`密钥已加密保存，公钥指纹 ${created.publicFingerprint}`);
+      }
+      const body = { name: v.name, host: v.host, port: v.port, sshUsername: v.sshUsername, credentialId, collectCommand: v.collectCommand, enabled: v.enabled };
       if (editing === 'new') {
-        await api.post('/servers', v);
+        await api.post('/servers', body);
         message.success('服务器已添加，请继续“扫描并确认主机指纹”');
       } else if (editing) {
-        const res = await api.patch<{ hostKeyReset: boolean }>(`/servers/${editing.id}`, v);
+        const res = await api.patch<{ hostKeyReset: boolean }>(`/servers/${editing.id}`, body);
         if (res.hostKeyReset) message.warning('地址或端口已变更，原主机指纹已作废，请重新扫描并确认');
         else message.success('已保存');
       }
@@ -180,7 +199,7 @@ function ServerModal({ editing, credentials, onClose, onSaved }: { editing: Serv
 
   return (
     <Modal title={editing === 'new' ? '添加服务器' : '编辑服务器'} open={editing !== null} onOk={submit} confirmLoading={saving} onCancel={onClose} destroyOnHidden
-      afterOpenChange={(o) => { if (o) { form.resetFields(); form.setFieldsValue(initial); } }}>
+      width={640} afterOpenChange={(o) => { if (o) { form.resetFields(); form.setFieldsValue(initial); setCredMode(editing === 'new' && usable.length === 0 ? 'new' : 'existing'); } }}>
       <Form form={form} layout="vertical" autoComplete="off">
         <Form.Item name="name" label="名称" rules={[{ required: true, message: '请输入名称' }]}><Input maxLength={100} placeholder="例如：gpu-a" /></Form.Item>
         <Space size={16} align="start" style={{ display: 'flex' }}>
@@ -188,9 +207,26 @@ function ServerModal({ editing, credentials, onClose, onSaved }: { editing: Serv
           <Form.Item name="port" label="SSH 端口" rules={[{ required: true }]}><InputNumber min={1} max={65535} precision={0} /></Form.Item>
         </Space>
         <Form.Item name="sshUsername" label="SSH 登录用户名（建议专用采集账户）" rules={[{ required: true, message: '请输入用户名' }]}><Input maxLength={32} placeholder="collector" /></Form.Item>
-        <Form.Item name="credentialId" label="SSH 凭据" rules={[{ required: true, message: '请选择凭据' }]}>
-          <Select placeholder="请先在“凭据”页新增" options={credentials.map((c) => ({ value: c.id, label: `${c.name}（${c.keyType}）${c.revokedAt ? ' · 已撤销' : ''}`, disabled: Boolean(c.revokedAt) }))} />
+        <Form.Item label="SSH 密钥" required style={{ marginBottom: 8 }}>
+          <Radio.Group value={credMode} onChange={(e) => setCredMode(e.target.value)} optionType="button" buttonStyle="solid" size="small"
+            options={[{ value: 'new', label: '录入新密钥' }, { value: 'existing', label: `选择已有凭据（${usable.length}）`, disabled: usable.length === 0 }]} />
         </Form.Item>
+        {credMode === 'existing' ? (
+          <Form.Item name="credentialId" rules={[{ required: true, message: '请选择凭据，或改为“录入新密钥”' }]}>
+            <Select placeholder="选择凭据" options={credentials.map((c) => ({ value: c.id, label: `${c.name}（${c.keyType}）${c.revokedAt ? ' · 已撤销' : ''}`, disabled: Boolean(c.revokedAt) }))} />
+          </Form.Item>
+        ) : (
+          <>
+            <Form.Item name="privateKey" rules={[{ required: true, min: 50, message: '请粘贴完整的私钥，或拖入私钥文件' }]} style={{ marginBottom: 12 }}
+              extra="提交后加密保存并自动出现在“凭据”页，可供其他服务器复用；之后只显示名称与指纹，无法再查看明文。">
+              <PrivateKeyInput />
+            </Form.Item>
+            <Space size={16} align="start" style={{ display: 'flex' }}>
+              <Form.Item name="passphrase" label="私钥口令（如有）" style={{ width: 280 }}><Input.Password autoComplete="new-password" /></Form.Item>
+              <Form.Item name="credentialName" label="凭据名称（可选）" style={{ width: 280 }}><Input maxLength={100} placeholder="默认：服务器名称 + “密钥”" /></Form.Item>
+            </Space>
+          </>
+        )}
         <Form.Item name="collectCommand" label="远端采集命令" tooltip="预装在服务器上的受限采集脚本：命令名或绝对路径。平台只会以白名单参数调用它，不会执行其他命令。" rules={[{ required: true }]}>
           <Input placeholder="ccusage-collect" />
         </Form.Item>
@@ -616,7 +652,7 @@ export function ServersPage() {
         ]}
       />
 
-      <ServerModal editing={serverModal} credentials={creds} onClose={() => setServerModal(null)} onSaved={reload} />
+      <ServerModal editing={serverModal} credentials={creds} onClose={() => setServerModal(null)} onSaved={reload} onCredentialCreated={credentials.reload} />
       <HostKeyModal server={hostKeyFor} onClose={() => setHostKeyFor(null)} onSaved={reload} />
       <TargetModal state={targetModal} credentials={creds} users={users} sources={meta?.sources ?? []} onClose={() => setTargetModal(null)} onSaved={reload} />
       <RebindModal target={rebindFor} users={users} onClose={() => setRebindFor(null)} onSaved={reload} />
