@@ -1,0 +1,45 @@
+{
+  "name": "usage-monitor-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev:api": "tsx watch src/main-api.ts",
+    "dev:collector": "tsx watch src/main-collector.ts",
+    "dev:mailer": "tsx watch src/main-mailer.ts",
+    "start:api": "node dist/main-api.js",
+    "start:collector": "node dist/main-collector.js",
+    "start:mailer": "node dist/main-mailer.js",
+    "migrate": "node dist/db/migrate-cli.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.1.2",
+    "@fastify/jwt": "^10.2.2",
+    "@fastify/rate-limit": "^11.2.0",
+    "@fastify/static": "^10.1.4",
+    "bullmq": "^6.3.8",
+    "fastify": "^5.12.5",
+    "ioredis": "^6.0.0",
+    "nodemailer": "^10.0.10",
+    "pg": "^8.23.0",
+    "pino": "^10.3.1",
+    "ssh2": "^1.17.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/nodemailer": "^8.0.2",
+    "@types/pg": "^8.23.1",
+    "@types/ssh2": "^1.15.6",
+    "embedded-postgres": "^18.4.0-beta.17",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}

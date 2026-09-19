@@ -1,0 +1,79 @@
+# 部署：前端/API、采集 Worker、邮件 Worker、PostgreSQL、Redis、HTTPS 反向代理。
+# 初期同机部署；Worker 可以之后拆到独立主机（只需能连到 PostgreSQL 与 Redis）。
+
+x-app: &app
+  build: .
+  image: usage-monitor:1.0.0
+  restart: unless-stopped
+  env_file: .env
+  environment: &app-env
+    DATABASE_URL: postgres://usage:${POSTGRES_PASSWORD}@postgres:5432/usage
+    REDIS_URL: redis://redis:6379
+    MASTER_KEY_FILE: /run/secrets/master_key   # 主加密密钥与数据库分离管理，不进 .env、不进数据库备份
+  secrets: [master_key]
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+
+services:
+  api:
+    <<: *app
+    command: ["node", "dist/main-api.js"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  collector:
+    <<: *app
+    command: ["node", "dist/main-collector.js"]
+
+  mailer:
+    <<: *app
+    command: ["node", "dist/main-mailer.js"]
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: usage
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: usage
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U usage -d usage"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      SITE_DOMAIN: ${SITE_DOMAIN}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+    depends_on: [api]
+
+secrets:
+  master_key:
+    file: ./secrets/master_key
+
+volumes:
+  pgdata:
+  redisdata:
+  caddydata:

@@ -1,0 +1,11 @@
+# HTTPS 反向代理：Caddy 自动申请并续期证书。内网部署可改为 `tls internal` 或挂载自有证书。
+{$SITE_DOMAIN} {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy same-origin
+	}
+	reverse_proxy api:3000
+}

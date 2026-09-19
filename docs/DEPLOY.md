@@ -1,0 +1,94 @@
+# 部署与运维
+
+## 1. 组件
+
+| 容器 | 作用 | 可否多实例 |
+| --- | --- | --- |
+| `api` | 前端静态文件 + 后台 API；启动时执行数据库迁移、创建初始管理员 | 可以 |
+| `collector` | 定时建批、SSH 采集、入库、评估告警 | 可以（批次按时点唯一，目标有锁） |
+| `mailer` | 轮询发件箱发送邮件、失败退避重试 | 可以（`FOR UPDATE SKIP LOCKED`） |
+| `postgres` | 全部业务数据；发件箱与告警记录的事实来源 | — |
+| `redis` | BullMQ 队列与定时器；丢失后可重建，不含业务数据 | — |
+| `caddy` | HTTPS 反向代理，自动证书 | — |
+
+网页请求不会触发 SSH 采集，页面展示的是最近一次成功入库的结果。
+
+## 2. 中央平台
+
+```bash
+cp .env.example .env
+mkdir -p secrets && openssl rand -base64 32 > secrets/master_key && chmod 600 secrets/master_key
+docker compose up -d --build
+docker compose logs -f api collector mailer
+```
+
+- `secrets/master_key` 是 SSH 私钥与 SMTP 密码的主加密密钥，**不在数据库里，也不在 `.env` 里**。丢失后所有已保存的凭据无法解密，只能重新录入。
+- 首次登录后修改管理员密码，并从 `.env` 删除 `ADMIN_PASSWORD`。
+- 内网无公网证书时，把 `deploy/Caddyfile` 的站点块加上 `tls internal`，或挂载自有证书。
+
+## 3. 被采集服务器
+
+每台服务器执行一次（需要 root 与 Node.js ≥ 20）：
+
+```bash
+scp -r remote/ root@server-a:/tmp/usage-remote
+ssh root@server-a 'cd /tmp/usage-remote && ./install.sh "ssh-ed25519 AAAA... usage-monitor"'
+```
+
+脚本会：安装固定版本 `ccusage@20.0.23`；安装 `/usr/local/bin/ccusage-collect`；创建专用账户 `ccusage-collector`；写入带 `command="…",restrict` 的 `authorized_keys`——该密钥登录后**只能**运行采集脚本。
+
+然后：
+
+1. 编辑 `/etc/ccusage-collect/config.json` 的 `allowedDirs`，只保留要采集的目录（支持 `*` 匹配单个路径段）。
+2. 给采集账户授予只读权限：
+   ```bash
+   setfacl -m u:ccusage-collector:x /home/zhangsan
+   setfacl -R -m u:ccusage-collector:rX /home/zhangsan/.claude
+   setfacl -R -d -m u:ccusage-collector:rX /home/zhangsan/.claude   # 新文件自动继承
+   ```
+3. 记下主机指纹，供平台上核对：`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
+
+无法集中授权时，可以不建专用账户：把同一行 `command="…",restrict <公钥>` 加到用户自己的 `~/.ssh/authorized_keys`，并在平台的采集目标上覆盖 SSH 用户名（必要时覆盖凭据）。
+
+**隐私说明**：采集账户对会话日志有读权限（ccusage 需要读取它们），但采集脚本只向平台输出按日、按模型的 Token 与费用统计，不上传提示词、回答或会话内容。
+
+**费用口径**：`config.json` 的 `costMode`（`auto`/`calculate`/`display`）与 `offline` 决定估算费用的计算方式，平台会把 ccusage 版本与计价模式随每行统计一起记录（`price_version`）。各服务器应保持同一版本与同一配置；升级 ccusage 时同步修改 `expectedCcusageVersion`，版本不符时采集会明确失败而不是混入不同口径的数据。
+
+## 4. 日常运维
+
+| 场景 | 处理 |
+| --- | --- |
+| 某目标显示“数据过期” | 服务器管理页看错误码：`CONNECT_*`/`UNREACHABLE` 网络问题；`AUTH_FAILED` 公钥未安装；`HOST_KEY_MISMATCH` 主机重装或遭劫持，核实后重新确认指纹；`DIR_MISSING`/`DIR_UNREADABLE`/`DIR_NOT_ALLOWED` 目录或权限/白名单问题；`CCUSAGE_VERSION_MISMATCH` 版本不符 |
+| 恢复连接后 | 无需手工操作：下一轮采集会从上次成功的前一天开始补齐 |
+| 行被标记 `retained` / `decrease_flagged` | 远端日志被清理或变小（Claude Code 默认会清理旧日志）。平台保留旧值。确认新值才正确时，在目标上执行“接受用量减少并覆盖”的手动采集 |
+| 日志迁移到另一台服务器 | 旧目标设置“来源结束日期”，新目标设置“来源开始日期”，避免同一份日志被统计两次 |
+| 用户换人/换绑定 | 使用“调整绑定”：默认从生效日起归新用户；需要迁移历史时勾选历史重归属（写入审计日志） |
+| 轮换采集密钥 | 凭据页“轮换”录入新私钥 → 各服务器更新 `authorized_keys`。紧急情况先“撤销”，采集会立即停止使用该凭据 |
+| 邮件最终失败 | 告警记录页查看失败原因，修复 SMTP 后点“重试” |
+| 修改采集周期/时区 | 系统设置保存后立即生效（重新登记定时器） |
+
+## 5. 备份与恢复
+
+需要**分别**备份两样东西，缺一不可：
+
+1. 数据库：`docker compose exec postgres pg_dump -U usage -Fc usage > usage-$(date +%F).dump`（建议每日，并异地保存）
+2. 主密钥 `secrets/master_key`：放入密码管理器或离线介质，**不要**和数据库备份放在一起。
+
+恢复演练（建议上线前做一次并记入验收记录）：
+
+```bash
+docker compose up -d postgres
+docker compose exec -T postgres pg_restore -U usage -d usage --clean --if-exists < usage-2026-09-19.dump
+# 放回 secrets/master_key 后
+docker compose up -d
+```
+
+验证：登录 → 服务器管理 → 对任一服务器点“测试连接”。成功说明凭据可被主密钥解密。Redis 无需备份；其数据丢失后，Worker 启动时会重新登记定时器，并为当前时点补建采集批次。
+
+## 6. 升级
+
+```bash
+git pull && docker compose up -d --build
+```
+
+数据库迁移在启动时自动执行（带咨询锁，多容器同时启动是安全的）。迁移文件位于 `server/migrations/`，只增不改。

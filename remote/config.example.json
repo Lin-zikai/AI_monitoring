@@ -1,0 +1,8 @@
+{
+  "allowedDirs": ["/home/*/.claude"],
+  "ccusageBin": "/usr/local/bin/ccusage",
+  "expectedCcusageVersion": "20.0.23",
+  "costMode": "auto",
+  "offline": true,
+  "timeoutSeconds": 100
+}
