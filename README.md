@@ -28,6 +28,16 @@ docker compose up -d --build
 
 之后系统在统计时区（默认 Asia/Shanghai）每日 00:00、02:00、04:00…… 自动采集。详见 [docs/DEPLOY.md](docs/DEPLOY.md)。
 
+## 不用 Docker 的本机运行（演示/试用）
+
+```bash
+scripts/local-run.sh start     # 嵌入式 PostgreSQL + 本地 redis-server + 三个进程，默认监听 0.0.0.0:3000
+scripts/local-run.sh status
+scripts/local-run.sh stop
+```
+
+数据、随机生成的密钥与初始管理员密码都在 `.local-run/`（已被 git 忽略，`env` 文件权限 600）。需要本机有 `redis-server`（或用 `REDIS_SERVER_BIN` 指定）。这种方式走明文 HTTP，登录密码与会话 Cookie 在网络上不加密，只适合可信内网试用；正式使用请走上面的 Docker Compose + HTTPS。
+
 ## 本地开发
 
 需要本机有 PostgreSQL 与 Redis：
