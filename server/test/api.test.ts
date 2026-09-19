@@ -205,6 +205,13 @@ describe('总览仪表盘', () => {
     const row = (await get('/api/stats/overview', adminCookie)).json().todayRanking.find((r: { name: string }) => r.name === 'wang');
     expect(row).toMatchObject({ claudeTokens: 3000, claudeCost: 1.5, codexTokens: 500, codexCost: 0.25, totalTokens: 3500, totalCost: 1.75 });
     expect((await get('/api/stats/overview', zhangsanCookie)).json().todayRanking).toEqual([]);
+
+    // 可以查看任意一天的排名；普通用户无权访问，未来日期被拒绝
+    const past = (await get('/api/stats/daily-ranking?date=2026-09-19', adminCookie)).json();
+    expect(past.rows.map((r: { name: string; totalTokens: number }) => [r.name, r.totalTokens]).sort()).toEqual([['lisi', 777], ['zhangsan', 1000]]);
+    expect((await get(`/api/stats/daily-ranking?date=${day}`, adminCookie)).json().rows.find((r: { name: string }) => r.name === 'wang')).toMatchObject({ totalCost: 1.75 });
+    expect((await get('/api/stats/daily-ranking', zhangsanCookie)).statusCode).toBe(403);
+    expect((await get('/api/stats/daily-ranking?date=2999-01-01', adminCookie)).statusCode).toBe(400);
     await db.query('DELETE FROM usage_daily WHERE user_id = $1', [wang]);
   });
 });

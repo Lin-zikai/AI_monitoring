@@ -69,6 +69,27 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
     };
   }
 
+  /** 某一天的用量排名：按数据源分列（Claude Code / Codex）并给出合计；返回当日全部有用量的用户，由前端按所选口径取前 10 */
+  const dailyRanking = (date: string) => db.query(
+    `SELECT u.id AS "userId", u.name, u.team,
+            sum(d.total_tokens) FILTER (WHERE d.source = 'claude-code')::bigint AS "claudeTokens", sum(d.cost_usd) FILTER (WHERE d.source = 'claude-code')::float8 AS "claudeCost",
+            sum(d.total_tokens) FILTER (WHERE d.source = 'codex')::bigint AS "codexTokens", sum(d.cost_usd) FILTER (WHERE d.source = 'codex')::float8 AS "codexCost",
+            sum(d.total_tokens)::bigint AS "totalTokens", sum(d.cost_usd)::float8 AS "totalCost"
+       FROM usage_daily d JOIN users u ON u.id = d.user_id WHERE d.usage_date = $1::date
+      GROUP BY u.id ORDER BY "totalCost" DESC NULLS LAST, "totalTokens" DESC NULLS LAST LIMIT 500`,
+    [date],
+  );
+
+  app.get('/stats/daily-ranking', { preHandler: ctx.requireAdmin }, async (req) => {
+    const q = parse(z.object({ date: dateStr.optional() }), req.query);
+    const settings = await getGeneralSettings(db);
+    const today = dateInTz(new Date(), settings.timezone);
+    const date = q.date ?? today;
+    if (date > today) throw new HttpError(400, '不能选择未来的日期');
+    const first = (await db.query('SELECT min(usage_date)::text AS d FROM usage_daily')).rows[0].d as string | null;
+    return { date, today, earliest: first ?? today, rows: (await dailyRanking(date)).rows };
+  });
+
   app.get('/meta', auth, async (req) => {
     const settings = await getGeneralSettings(db);
     return { ...(await freshness(scopedUserId(req), settings, new Date())), sources: supportedSources(), sourceInfo: SOURCE_INFO };
@@ -149,18 +170,7 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
           [today, month.first, month.last],
         )
         : Promise.resolve({ rows: [] }),
-      // 今日排名：按数据源分列（Claude Code / Codex）并给出合计；返回当日全部有用量的用户，由前端按所选口径取前 10
-      me.role === 'admin'
-        ? db.query(
-          `SELECT u.id AS "userId", u.name, u.team,
-                  sum(d.total_tokens) FILTER (WHERE d.source = 'claude-code')::bigint AS "claudeTokens", sum(d.cost_usd) FILTER (WHERE d.source = 'claude-code')::float8 AS "claudeCost",
-                  sum(d.total_tokens) FILTER (WHERE d.source = 'codex')::bigint AS "codexTokens", sum(d.cost_usd) FILTER (WHERE d.source = 'codex')::float8 AS "codexCost",
-                  sum(d.total_tokens)::bigint AS "totalTokens", sum(d.cost_usd)::float8 AS "totalCost"
-             FROM usage_daily d JOIN users u ON u.id = d.user_id WHERE d.usage_date = $1
-            GROUP BY u.id ORDER BY "totalCost" DESC NULLS LAST, "totalTokens" DESC NULLS LAST LIMIT 500`,
-          [today],
-        )
-        : Promise.resolve({ rows: [] }),
+      me.role === 'admin' ? dailyRanking(today) : Promise.resolve({ rows: [] }),
       db.query(
         `SELECT t.id AS "targetId", s.name AS "serverName", t.data_dir AS "dataDir", u.name AS "userName", t.last_status AS "lastStatus",
                 t.last_error_code AS "lastErrorCode", t.last_error AS "lastError", t.last_success_at AS "lastSuccessAt", t.consecutive_failures AS "consecutiveFailures"

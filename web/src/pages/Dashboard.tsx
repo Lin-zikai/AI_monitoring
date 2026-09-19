@@ -1,4 +1,5 @@
-import { Alert, Card, Col, Row, Segmented, Select, Space, Table, Tag, Typography } from 'antd';
+import { Alert, Card, Col, DatePicker, Row, Segmented, Select, Space, Table, Tag, Typography } from 'antd';
+import dayjs from 'dayjs';
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
@@ -28,7 +29,12 @@ export function DashboardPage() {
   const [metric, setMetric] = useState<ChartMetric>('tokens');
   const { data, loading, error } = useFetch(() => api.get<Overview>('/stats/overview', { days }), [days]);
 
-  const todayAll = data?.todayRanking ?? [];
+  // 排名卡片自带日期选择：默认今天（统计时区），可回看任意一天
+  const [rankDate, setRankDate] = useState<string | undefined>(undefined);
+  const daily = useFetch(() => api.get<{ date: string; today: string; earliest: string; rows: Overview['todayRanking'] }>('/stats/daily-ranking', { date: rankDate }), [rankDate]);
+  const shownDate = daily.data?.date ?? rankDate ?? data?.freshness.today ?? '';
+  const isToday = !daily.data || daily.data.date === daily.data.today;
+  const todayAll = daily.data?.rows ?? [];
   // 按所选口径（合计 / Claude Code / Codex）排序取前 10：先比估算费用，再比 Token；该口径下没有用量的人不入榜
   const todayTop = useMemo(() => {
     const k = RANK_KEYS[rankBy];
@@ -83,12 +89,19 @@ export function DashboardPage() {
       </Row>
 
       <Card
-        title={`今日用量排名 Top 10（${data?.freshness.today ?? ''}）`} size="small" style={{ marginTop: 16 }}
-        extra={<Space size={8}><Typography.Text type="secondary">排名依据</Typography.Text><Segmented size="small" value={rankBy} onChange={(v) => setRankBy(v as RankBy)} options={RANK_OPTIONS} /></Space>}
+        title={`${isToday ? '今日' : shownDate + ' '}用量排名 Top 10`} size="small" style={{ marginTop: 16 }}
+        extra={<Space size={8} wrap>
+          <Typography.Text type="secondary">日期</Typography.Text>
+          <DatePicker
+            size="small" allowClear={false} value={shownDate ? dayjs(shownDate) : null} style={{ width: 130 }}
+            onChange={(d) => setRankDate(d ? d.format('YYYY-MM-DD') : undefined)}
+            disabledDate={(d) => { const v = d.format('YYYY-MM-DD'); return Boolean(daily.data) && (v > daily.data!.today || v < daily.data!.earliest); }}
+            presets={daily.data ? [0, 1, 2].map((n) => ({ label: ['今天', '昨天', '前天'][n]!, value: dayjs(daily.data!.today).subtract(n, 'day') })) : []}
+          /><Typography.Text type="secondary">排名依据</Typography.Text><Segmented size="small" value={rankBy} onChange={(v) => setRankBy(v as RankBy)} options={RANK_OPTIONS} /></Space>}
       >
         <Table
-          size="small" rowKey="userId" pagination={false} dataSource={todayTop} loading={first} scroll={{ x: 820 }}
-          locale={{ emptyText: '今日还没有用量' }}
+          size="small" rowKey="userId" pagination={false} dataSource={todayTop} loading={daily.loading} scroll={{ x: 820 }}
+          locale={{ emptyText: isToday ? '今日还没有用量' : '这一天没有用量记录' }}
           columns={[
             { title: '#', width: 40, render: (_v, _r, i) => i + 1 },
             { title: '用户', render: (_v, r) => <Link to={`/users/${r.userId}`}>{r.name}</Link> },
@@ -108,7 +121,7 @@ export function DashboardPage() {
           ]}
           summary={() => (todayAll.length === 0 ? null : (
             <Table.Summary.Row style={{ background: '#fafafa' }}>
-              <Table.Summary.Cell index={0} colSpan={3}><Typography.Text strong>今日全员合计（{todayAll.length} 人）</Typography.Text></Table.Summary.Cell>
+              <Table.Summary.Cell index={0} colSpan={3}><Typography.Text strong>{isToday ? '今日' : '当日'}全员合计（{todayAll.length} 人）</Typography.Text></Table.Summary.Cell>
               <Table.Summary.Cell index={3} align="right"><SourceTokens value={todaySum.claudeTokens} /></Table.Summary.Cell>
               <Table.Summary.Cell index={4} align="right"><SourceCost value={todaySum.claudeCost} tokens={todaySum.claudeTokens} /></Table.Summary.Cell>
               <Table.Summary.Cell index={5} align="right"><SourceTokens value={todaySum.codexTokens} /></Table.Summary.Cell>
