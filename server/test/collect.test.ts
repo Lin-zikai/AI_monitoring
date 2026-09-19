@@ -355,39 +355,56 @@ describe('邮件告警', () => {
 });
 
 describe('账号额度', () => {
-  const limitsReply = (body: object) => ({ stdout: JSON.stringify({ schema: 1, collectorVersion: '1.5.0', ...body }), stderr: '', exitCode: 0 });
+  const reply = (body: object) => ({ stdout: JSON.stringify({ schema: 1, collectorVersion: '1.6.0', ...body }), stderr: '', exitCode: 0 });
+  const weekly = (used: number) => [{ key: 'seven_day', label: '每周', windowMinutes: 10080, usedPercent: used, resetsAt: '2099-09-22T10:00:00.000Z' }];
 
-  it('某台服务器令牌过期时换下一台；只保存百分比与刷新时间；失败晚于成功时给出提示', async () => {
+  it('不同服务器登录不同账号时按账号分别显示；同一账号只向服务商查询一次，令牌过期就换同账号的下一台', async () => {
+    const serverC = await addServer(db, 'server-c', credentialId);
+    const targetC = await addTarget(db, serverC, zhangsan, '/home/c/.claude');
     const usage = fakeExecutor(() => report({ '2026-09-19': [opus(1000, 1)] }));
-    await collect(db, usage, targetA, NOW);
-    await collect(db, usage, targetB, NOW);
-    const asked: string[] = [];
+    for (const t of [targetA, targetB, targetC]) await collect(db, usage, t, NOW);
+
+    // A、B 登录同一个账号（A 的令牌已过期），C 登录另一个账号
+    const accountOf: Record<string, { accountKey: string; accountLabel: string }> = {
+      'server-a.internal': { accountKey: 'acct-1', accountLabel: 'team@example.com' },
+      'server-b.internal': { accountKey: 'acct-1', accountLabel: 'team@example.com' },
+      'server-c.internal': { accountKey: 'acct-2', accountLabel: 'solo@example.com' },
+    };
+    const limitCalls: string[] = [];
     const executor = { exec: async (t: { host: string }, command: string) => {
-      asked.push(`${t.host} ${command}`);
-      if (command.includes('--limits codex')) return limitsReply({ status: 'error', code: 'NO_LOGIN', message: '没有登录信息' });
-      return t.host === 'server-a.internal'
-        ? limitsReply({ status: 'error', code: 'TOKEN_EXPIRED', message: '登录令牌已过期' })
-        : limitsReply({ status: 'ok', plan: 'max', windows: [
-          { key: 'five_hour', label: '5 小时', windowMinutes: 300, usedPercent: 37.5, resetsAt: '2026-09-19T21:30:00.000Z' },
-          { key: 'seven_day', label: '每周', windowMinutes: 10080, usedPercent: 46, resetsAt: '2026-09-22T10:00:00.000Z' }] });
+      const id = accountOf[t.host]!;
+      if (command.includes('--identity')) return reply({ status: 'ok', ...id });
+      limitCalls.push(t.host);
+      if (t.host === 'server-a.internal') return reply({ status: 'error', code: 'TOKEN_EXPIRED', message: '登录令牌已过期', ...id });
+      return reply({ status: 'ok', plan: 'max', windows: weekly(t.host === 'server-b.internal' ? 46 : 91), ...id });
     } };
     const deps = { db, executor, masterKey: (await import('./helpers.js')).masterKey, log: silentLog };
 
     const outcomes = await refreshAccountLimits(deps);
-    expect(outcomes.find((o) => o.provider === 'claude-code')).toMatchObject({ ok: true, serverName: 'server-b' });
-    expect(asked.filter((a) => a.includes('claude-code'))).toEqual([
-      'server-a.internal ccusage-collect --limits claude-code --dir /home/zhangsan/.claude',
-      'server-b.internal ccusage-collect --limits claude-code --dir /home/developer/.claude',
-    ]);
+    expect(outcomes.map((o) => [o.accountLabel, o.ok, o.serverName]).sort()).toEqual([['solo@example.com', true, 'server-c'], ['team@example.com', true, 'server-b']]);
+    expect(limitCalls.sort()).toEqual(['server-a.internal', 'server-b.internal', 'server-c.internal']); // acct-1：A 失败后换 B；不会再多查
 
     const view = await latestAccountLimits(db);
-    expect(view.find((v) => v.provider === 'claude-code')).toMatchObject({
-      plan: 'max', serverName: 'server-b', lastError: null,
-      windows: [{ key: 'five_hour', usedPercent: 37.5, resetsAt: '2026-09-19T21:30:00.000Z' }, { key: 'seven_day', usedPercent: 46 }],
-    });
-    // Codex 没有任何采集成功的目标 → 明确说明，而不是空白
-    expect(view.find((v) => v.provider === 'codex')).toMatchObject({ windows: [], fetchedAt: null, lastError: { code: 'NO_SOURCE' } });
-    expect(JSON.stringify((await db.query('SELECT * FROM account_limit_snapshots')).rows)).not.toMatch(/token|Bearer|test-key/i);
+    expect(view.limits.map((v) => [v.provider, v.accountLabel, v.servers, v.windows[0]?.usedPercent, v.lastError])).toEqual([
+      ['claude-code', 'solo@example.com', ['server-c'], 91, null],
+      ['claude-code', 'team@example.com', ['server-a', 'server-b'], 46, null],
+    ]);
+    expect(JSON.stringify((await db.query('SELECT * FROM account_limit_snapshots')).rows)).not.toMatch(/Bearer|test-key|privateKey/i);
+
+    // server-b 换成了 solo 的账号：下一轮立即反映，team 账号只剩 server-a，且因令牌过期显示错误
+    accountOf['server-b.internal'] = accountOf['server-c.internal']!;
+    await refreshAccountLimits(deps);
+    const after = (await latestAccountLimits(db)).limits;
+    expect(after.map((v) => [v.accountLabel, v.servers])).toEqual([['solo@example.com', ['server-b', 'server-c']], ['team@example.com', ['server-a']]]);
+    expect(after[1]).toMatchObject({ windows: weekly(46), lastError: { code: 'TOKEN_EXPIRED' } }); // 仍显示上一次的读数，并标明最近一次失败
+  });
+
+  it('识别不出账号的来源单独列出原因', async () => {
+    await collect(db, fakeExecutor(() => report({ '2026-09-19': [opus(1, 1)] })), targetA, NOW);
+    const executor = { exec: async () => reply({ status: 'error', code: 'NO_LOGIN', message: '该目录下没有订阅账号的登录信息' }) };
+    await refreshAccountLimits({ db, executor, masterKey: (await import('./helpers.js')).masterKey, log: silentLog });
+    const view = await latestAccountLimits(db);
+    expect(view).toMatchObject({ limits: [], checked: true, unidentified: [{ provider: 'claude-code', serverName: 'server-a', error: expect.stringContaining('NO_LOGIN') }] });
   });
 });
 
@@ -396,35 +413,37 @@ describe('账号额度提醒', () => {
     { key: 'five_hour', label: '5 小时', windowMinutes: 300, usedPercent: fiveHour, resetsAt: '2099-09-19T21:30:00.000Z' },
     { key: 'seven_day', label: '每周', windowMinutes: 10080, usedPercent: weekly, resetsAt: weeklyReset },
   ];
+  const claude = { provider: 'claude-code', accountKey: 'acct-1', accountLabel: 'team@example.com', plan: 'max', servers: ['ai', 'lzk'] };
   const deps = async () => ({ db, executor: fakeExecutor(() => report({})), masterKey: (await import('./helpers.js')).masterKey, log: silentLog, baseUrl: 'https://usage.example.com' });
   const enable = (extra: object = {}) => db.query("INSERT INTO settings (key, value) VALUES ('limitAlert', $1)", [JSON.stringify({ enabled: true, remainingBelowPercent: 20, notifyAdmins: false, emails: ['zyt@example.com'], ...extra })]);
 
   it('周额度剩余不足 20% 时提醒一次；同一刷新周期不重复，刷新后重新计；5 小时窗口默认不提醒', async () => {
     await enable();
     const d = await deps();
-    expect(await evaluateLimitAlerts(d, 'claude-code', 'max', windows(95, 79), 'ai')).toBe(0); // 周额度还剩 21%；5 小时已用 95% 但不提醒
-    expect(await evaluateLimitAlerts(d, 'claude-code', 'max', windows(95, 83.5), 'ai')).toBe(1);
-    expect(await evaluateLimitAlerts(d, 'claude-code', 'max', windows(99, 91, '2099-09-22T10:00:00.828Z'), 'ai')).toBe(0); // 同一周期（刷新时间只是毫秒级抖动）
-    expect(await evaluateLimitAlerts(d, 'codex', 'pro', windows(0, 88).slice(1), 'ai')).toBe(1); // 另一个账号单独计
-    expect(await evaluateLimitAlerts(d, 'claude-code', 'max', windows(10, 85, '2099-09-29T10:00:00.000Z'), 'ai')).toBe(1); // 新的一周
+    expect(await evaluateLimitAlerts(d, claude, windows(95, 79), 'ai')).toBe(0); // 周额度还剩 21%；5 小时已用 95% 但不提醒
+    expect(await evaluateLimitAlerts(d, claude, windows(95, 83.5), 'ai')).toBe(1);
+    expect(await evaluateLimitAlerts(d, claude, windows(99, 91, '2099-09-22T10:00:00.828Z'), 'ai')).toBe(0); // 同一周期（刷新时间只是毫秒级抖动）
+    expect(await evaluateLimitAlerts(d, { ...claude, accountKey: 'acct-2', accountLabel: 'solo@example.com', servers: ['gpu'] }, windows(0, 88).slice(1), 'gpu')).toBe(1); // 另一个账号单独计
+    expect(await evaluateLimitAlerts(d, claude, windows(10, 85, '2099-09-29T10:00:00.000Z'), 'ai')).toBe(1); // 新的一周
 
     const mails = await outbox(db);
     expect(mails.map((m) => m.subject)).toEqual([
-      '[额度提醒] Claude Code 每周额度仅剩 16.5%（已用 83.5%）',
-      '[额度提醒] Codex 每周额度仅剩 12%（已用 88%）',
-      '[额度提醒] Claude Code 每周额度仅剩 15%（已用 85%）',
+      '[额度提醒] Claude Code（team@example.com） 每周额度仅剩 16.5%（已用 83.5%）',
+      '[额度提醒] Claude Code（solo@example.com） 每周额度仅剩 12%（已用 88%）',
+      '[额度提醒] Claude Code（team@example.com） 每周额度仅剩 15%（已用 85%）',
     ]);
     expect(mails[0]).toMatchObject({ to_addrs: ['zyt@example.com'] });
     expect(mails[0].body_text).toContain('剩余：16.5%（低于提醒线 20%）');
     expect(mails[0].body_text).toContain('5 小时：已用 95%');
+    expect(mails[0].body_text).toContain('使用该账号的服务器：ai、lzk');
   });
 
   it('打开“5 小时窗口也提醒”后才为它发信；未启用时什么都不做', async () => {
     const d = await deps();
-    expect(await evaluateLimitAlerts(d, 'claude-code', 'max', windows(95, 95), 'ai')).toBe(0); // 未启用
+    expect(await evaluateLimitAlerts(d, claude, windows(95, 95), 'ai')).toBe(0); // 未启用
     await enable({ includeFiveHour: true });
-    expect(await evaluateLimitAlerts(d, 'claude-code', 'max', windows(95, 10), 'ai')).toBe(1);
-    expect((await outbox(db))[0].subject).toBe('[额度提醒] Claude Code 5 小时额度仅剩 5%（已用 95%）');
+    expect(await evaluateLimitAlerts(d, claude, windows(95, 10), 'ai')).toBe(1);
+    expect((await outbox(db))[0].subject).toBe('[额度提醒] Claude Code（team@example.com） 5 小时额度仅剩 5%（已用 95%）');
   });
 });
 

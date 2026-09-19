@@ -47,7 +47,7 @@ export function AlertEventsPage() {
           {
             title: isAdmin ? '用户 / 来源' : '来源', render: (_v, e) => (e.kind === 'usage'
               ? (isAdmin && e.userId ? <Link to={`/users/${e.userId}`}>{e.userName}</Link> : e.userName ?? '—')
-              : e.kind === 'account_limit' ? '共用账号'
+              : e.kind === 'account_limit' ? '订阅账号'
               : <>{e.serverName ?? '（来源已删除）'}<div><Typography.Text type="secondary" style={{ fontSize: 12 }}>{e.dataDir}</Typography.Text></div></>),
           },
           { title: '规则', render: (_v, e) => (e.kind === 'usage' ? <>{e.ruleName}<div><Typography.Text type="secondary" style={{ fontSize: 12 }}>{e.periodType && PERIOD_LABEL[e.periodType]}{e.metric && METRIC_LABEL[e.metric]}{e.metric === 'budget_pct' ? ` · ${e.tier}% 档` : ''}</Typography.Text></div></> : e.kind === 'account_limit' ? e.ruleName : '连续采集失败') },

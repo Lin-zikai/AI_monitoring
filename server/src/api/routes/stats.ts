@@ -93,12 +93,12 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
   });
 
   // ---- 账号额度（5 小时 / 周）：目前所有用户与服务器共用同一个账号，按数据源各展示一份 ----
-  app.get('/limits', { preHandler: ctx.requireAdmin }, async () => ({ limits: await latestAccountLimits(db) }));
+  app.get('/limits', { preHandler: ctx.requireAdmin }, async () => latestAccountLimits(db));
 
   app.post('/limits/refresh', { preHandler: ctx.requireAdmin, config: { rateLimit: { max: 6, timeWindow: '1 minute' } } }, async (req) => {
     const outcomes = await refreshAccountLimits({ db, executor: ctx.executor, masterKey: ctx.config.masterKey, log: req.log as unknown as Logger, baseUrl: ctx.config.publicBaseUrl });
     await ctx.queues.kickMail();
-    return { outcomes, limits: await latestAccountLimits(db) };
+    return { outcomes, ...(await latestAccountLimits(db)) };
   });
 
   app.get('/meta', auth, async (req) => {

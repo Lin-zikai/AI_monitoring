@@ -20,9 +20,9 @@
 
 import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
-const COLLECTOR_VERSION = '1.5.0';
+const COLLECTOR_VERSION = '1.6.0';
 const CONFIG_PATH = process.env.CCUSAGE_COLLECT_CONFIG || '/etc/ccusage-collect/config.json';
 const SAFE_PATH = /^\/[A-Za-z0-9._@+\-/]*$/;
 // requireLogRoot：Claude 没有 projects/ 时 ccusage 会报错，视为“确实没有用量”；Codex 的记录位置随版本变化（sessions/ 或 sqlite），交给 ccusage 判断
@@ -51,7 +51,7 @@ function parseArgs() {
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i];
     const value = argv[i + 1];
-    if (!/^--(source|dir|since|until|timezone|limits)$/.test(key ?? '') || value === undefined) fail('BAD_ARGS', '不支持的参数');
+    if (!/^--(source|dir|since|until|timezone|limits|identity)$/.test(key ?? '') || value === undefined) fail('BAD_ARGS', '不支持的参数');
     args[key.slice(2)] = value;
   }
   return args;
@@ -130,6 +130,29 @@ const toIso = (v) => {
 };
 const pct = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v * 10) / 10)) : null);
 
+/** 这个目录登录的是哪个账号：只读 CLI 自己保存的账号信息，不联网。accountKey 是服务商的账号 ID（不是令牌），label 是登录邮箱 */
+const IDENTITY = {
+  'claude-code'(realDir) {
+    // Claude Code 把账号信息放在与 .claude 同级的 ~/.claude.json；设置了 CLAUDE_CONFIG_DIR 时则在目录内
+    for (const file of [join(dirname(realDir), '.claude.json'), join(realDir, '.claude.json')]) {
+      try {
+        const a = JSON.parse(readFileSync(file, 'utf8')).oauthAccount;
+        if (a?.accountUuid) return { accountKey: String(a.accountUuid), accountLabel: a.emailAddress ? String(a.emailAddress) : null };
+      } catch { /* 换下一个位置 */ }
+    }
+    return null;
+  },
+  codex(realDir) {
+    try {
+      const auth = JSON.parse(readFileSync(join(realDir, 'auth.json'), 'utf8'));
+      let claims = {};
+      try { claims = JSON.parse(Buffer.from(String(auth.tokens.id_token).split('.')[1], 'base64url').toString('utf8')); } catch { /* id_token 不是 JWT */ }
+      const key = auth.tokens?.account_id ?? claims['https://api.openai.com/auth']?.chatgpt_account_id ?? claims.sub;
+      return key ? { accountKey: String(key), accountLabel: claims.email ? String(claims.email) : null } : null;
+    } catch { return null; }
+  },
+};
+
 const LIMIT_PROVIDERS = {
   'claude-code': {
     async query(realDir, env) {
@@ -169,24 +192,30 @@ const LIMIT_PROVIDERS = {
   },
 };
 
-async function mainLimits(args) {
-  const provider = LIMIT_PROVIDERS[args.limits];
-  if (!provider) fail('UNSUPPORTED_SOURCE', '不支持的数据源');
+/** --limits：查询额度；--identity：只报告账号标识（不联网） */
+async function mainAccount(args) {
+  const provider = args.limits ?? args.identity;
+  if (!LIMIT_PROVIDERS[provider]) fail('UNSUPPORTED_SOURCE', '不支持的数据源');
   if (!args.dir || !SAFE_PATH.test(args.dir) || args.dir.split('/').includes('..')) fail('BAD_ARGS', '目录参数不合法');
-  Object.assign(echo, { limits: args.limits, dir: args.dir });
+  Object.assign(echo, args.limits !== undefined ? { limits: provider } : { identity: provider }, { dir: args.dir });
   let config;
   try { config = JSON.parse(readFileSync(CONFIG_PATH, 'utf8')); } catch (err) { rethrowDone(err); fail('CONFIG_MISSING', `无法读取采集配置 ${CONFIG_PATH}`); }
   if (!existsSync(args.dir)) fail('DIR_MISSING', '数据目录不存在');
   const realDir = realpathSync(args.dir);
   if (!dirAllowed(realDir, config.allowedDirs ?? [])) fail('DIR_NOT_ALLOWED', '目录不在本机采集白名单内');
+  Object.assign(echo, IDENTITY[provider](realDir) ?? { accountKey: null, accountLabel: null }); // 即使后面查询失败，也带上账号标识
+  if (args.identity !== undefined) {
+    if (!echo.accountKey) fail('NO_LOGIN', '该目录下没有订阅账号的登录信息');
+    finish({ status: 'ok' });
+  }
   const env = { PATH: process.env.PATH, HOME: process.env.HOME, ...(await proxyEnv(realDir)) };
-  const result = await provider.query(realDir, env);
+  const result = await LIMIT_PROVIDERS[provider].query(realDir, env);
   finish({ status: 'ok', fetchedAt: new Date().toISOString(), ...result });
 }
 
 async function main() {
   const args = parseArgs();
-  if (args.limits !== undefined) return mainLimits(args);
+  if (args.limits !== undefined || args.identity !== undefined) return mainAccount(args);
   const source = SOURCES[args.source];
   if (!source) fail('UNSUPPORTED_SOURCE', '不支持的数据源');
   if (!args.dir || !SAFE_PATH.test(args.dir) || args.dir.split('/').includes('..')) fail('BAD_ARGS', '目录参数不合法');

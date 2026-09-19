@@ -21,7 +21,7 @@ export function LimitAlertCard() {
 
   return (
     <Card size="small" title="账号额度提醒" style={{ marginBottom: 16 }}
-      extra={<Typography.Text type="secondary" style={{ fontSize: 12 }}>Claude Code 或 Codex 共用账号的额度快用完时发邮件；同一窗口在一个刷新周期内只提醒一次</Typography.Text>}>
+      extra={<Typography.Text type="secondary" style={{ fontSize: 12 }}>任一订阅账号（Claude Code / Codex）的额度快用完时发邮件；每个账号的同一窗口在一个刷新周期内只提醒一次</Typography.Text>}>
       <Form form={form} layout="inline" onFinish={save} disabled={!data} style={{ rowGap: 12 }}>
         <Form.Item name="enabled" label="启用" valuePropName="checked"><Switch /></Form.Item>
         <Form.Item label="周额度剩余低于">

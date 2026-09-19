@@ -86,7 +86,7 @@ export function renderFailureAlert(m: FailureAlertMail): { subject: string; text
 }
 
 export interface LimitAlertMail {
-  providerLabel: string; plan: string | null; windowLabel: string; usedPercent: number; thresholdRemaining: number;
+  providerLabel: string; accountLabel?: string | null; servers?: string[]; plan: string | null; windowLabel: string; usedPercent: number; thresholdRemaining: number;
   resetsAt: Date | null; others: Array<{ label: string; usedPercent: number | null; resetsAt: Date | null }>;
   fetchedAt: Date; serverName: string | null; timezone: string; baseUrl: string;
 }
@@ -95,7 +95,8 @@ export function renderLimitAlert(m: LimitAlertMail): { subject: string; text: st
   const remaining = Math.round((100 - m.usedPercent) * 10) / 10;
   const when = (d: Date | null) => (d ? `${formatInTz(d, m.timezone)}（${m.timezone}）` : '未知');
   const lines = [
-    `账号：${m.providerLabel}${m.plan ? `（${m.plan}）` : ''}`,
+    `账号：${m.providerLabel}${m.accountLabel ? ` ${m.accountLabel}` : ''}${m.plan ? `（${m.plan}）` : ''}`,
+    ...(m.servers?.length ? [`使用该账号的服务器：${m.servers.join('、')}`] : []),
     `额度窗口：${m.windowLabel}`,
     `已用：${m.usedPercent}%`,
     `剩余：${remaining}%（低于提醒线 ${m.thresholdRemaining}%）`,
@@ -105,6 +106,6 @@ export function renderLimitAlert(m: LimitAlertMail): { subject: string; text: st
     lines.push('', '该账号的其他额度窗口：');
     for (const o of m.others) lines.push(`  - ${o.label}：已用 ${o.usedPercent ?? '未知'}%，刷新时间 ${when(o.resetsAt)}`);
   }
-  lines.push('', `数据查询于：${when(m.fetchedAt)}${m.serverName ? `，经 ${m.serverName}` : ''}`, '目前所有用户与服务器共用这个账号；额度用尽后所有人都会受影响。同一窗口在本次刷新周期内不会重复提醒。', '', `查看详情：${m.baseUrl}/`);
-  return { subject: `[额度提醒] ${m.providerLabel} ${m.windowLabel}额度仅剩 ${remaining}%（已用 ${m.usedPercent}%）`, text: lines.join('\n') };
+  lines.push('', `数据查询于：${when(m.fetchedAt)}${m.serverName ? `，经 ${m.serverName}` : ''}`, '额度用尽后，使用该账号的所有服务器都会受影响。同一窗口在本次刷新周期内不会重复提醒。', '', `查看详情：${m.baseUrl}/`);
+  return { subject: `[额度提醒] ${m.providerLabel}${m.accountLabel ? `（${m.accountLabel}）` : ''} ${m.windowLabel}额度仅剩 ${remaining}%（已用 ${m.usedPercent}%）`, text: lines.join('\n') };
 }
