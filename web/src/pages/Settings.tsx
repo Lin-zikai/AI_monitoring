@@ -57,6 +57,8 @@ function GeneralTab() {
 
 interface SmtpForm { host: string; port: number; secure: boolean; username?: string; from: string; password?: string; clearPassword?: boolean }
 
+const SMTP_PRESETS = [{ label: '163 邮箱', host: 'smtp.163.com' }, { label: 'QQ 邮箱', host: 'smtp.qq.com' }, { label: '126 邮箱', host: 'smtp.126.com' }];
+
 function SmtpTab() {
   const { message, modal } = App.useApp();
   const { user } = useAuth();
@@ -100,13 +102,23 @@ function SmtpTab() {
           title={data.envFallback ? '当前使用环境变量中的 SMTP 配置；在此保存后将以这里的设置为准。' : '尚未配置 SMTP：告警邮件会保留在发件箱中，配置后自动发送。'} />
       )}
       <Form form={form} layout="vertical" onFinish={save} style={{ maxWidth: 560 }} autoComplete="off" disabled={!data}>
+        <Form.Item label="快速预设" extra="点一下自动填好服务器、端口和加密方式；之后只需填邮箱地址和授权码。163 / QQ 邮箱的“密码”是客户端授权码（网页邮箱 设置 → POP3/SMTP/IMAP 里开启 SMTP 服务后生成），不是登录密码。">
+          <Space>
+            {SMTP_PRESETS.map((p) => (
+              <Button key={p.label} size="small" onClick={() => form.setFieldsValue({ host: p.host, port: 465, secure: true })}>{p.label}</Button>
+            ))}
+          </Space>
+        </Form.Item>
+        <Form.Item label="邮箱地址" extra="填写后自动同步到下面的“用户名”和“发件人”。">
+          <Input placeholder="yourname@163.com" autoComplete="off" onChange={(e) => { const v = e.target.value.trim(); form.setFieldsValue({ username: v, from: v ? `用量监控 <${v}>` : '' }); }} />
+        </Form.Item>
         <Space size={16} align="start" style={{ display: 'flex' }}>
           <Form.Item name="host" label="SMTP 服务器" rules={[{ required: true, message: '请输入服务器地址' }]} style={{ width: 320 }}><Input placeholder="smtp.example.com" /></Form.Item>
           <Form.Item name="port" label="端口" rules={[{ required: true }]}><InputNumber min={1} max={65535} precision={0} /></Form.Item>
         </Space>
         <Form.Item name="secure" label="隐式 TLS（通常为 465 端口）" valuePropName="checked" extra="关闭时使用 STARTTLS 并强制升级为加密连接，不会以明文投递。"><Switch /></Form.Item>
         <Form.Item name="username" label="用户名（可选）"><Input autoComplete="off" /></Form.Item>
-        <Form.Item name="password" label="密码" extra={data?.hasPassword ? '已保存密码（不回显）。留空表示不修改。' : '留空表示不设置密码。'}>
+        <Form.Item name="password" label="密码 / 授权码" extra={data?.hasPassword ? '已保存密码（不回显）。留空表示不修改。' : '留空表示不设置密码。'}>
           <Input.Password autoComplete="new-password" placeholder={data?.hasPassword ? '••••••••（留空不修改）' : ''} />
         </Form.Item>
         {data?.hasPassword && <Form.Item name="clearPassword" valuePropName="checked" label="清除已保存的密码"><Switch /></Form.Item>}
