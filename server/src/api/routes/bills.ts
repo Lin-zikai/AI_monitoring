@@ -113,7 +113,10 @@ export async function billRoutes(app: FastifyInstance, ctx: RouteContext): Promi
 
   const statsToday = async () => dateInTz(new Date(), (await getGeneralSettings(db)).timezone);
   /** 账单月份最晚到下个月（预付下月订阅），防止手滑填到很远的将来 */
-  const assertMonthNotFuture = async (month: string) => {
+  /** 账单月份的范围：不早于记账起始月份（账目设置），不晚于下个月 */
+  const assertMonthInRange = async (month: string) => {
+    const { startMonth } = await getBillingSettings(db);
+    if (month < startMonth) throw new HttpError(400, `参数错误: month 账单从 ${startMonth} 开始统计，不能早于这个月份`);
     const next = monthKey(addDays(monthRange(monthKey(await statsToday())).last, 1));
     if (month > next) throw new HttpError(400, `参数错误: month 账单月份不能晚于 ${next}`);
   };
@@ -139,7 +142,7 @@ export async function billRoutes(app: FastifyInstance, ctx: RouteContext): Promi
 
   app.post('/bills', upload, async (req, reply) => {
     const body = parse(createSchema, req.body);
-    await assertMonthNotFuture(body.month);
+    await assertMonthInRange(body.month);
     const files = decodeAttachments(body.attachments);
     const id = await withTx(db, async (tx) => {
       const res = await tx.query(
@@ -158,7 +161,7 @@ export async function billRoutes(app: FastifyInstance, ctx: RouteContext): Promi
   app.patch('/bills/:id', upload, async (req) => {
     const { id } = parse(idParam, req.params);
     const body = parse(patchSchema, req.body);
-    if (body.month !== undefined) await assertMonthNotFuture(body.month);
+    if (body.month !== undefined) await assertMonthInRange(body.month);
     const files = decodeAttachments(body.addAttachments ?? []);
     const removeIds = [...new Set(body.removeAttachmentIds ?? [])];
 
@@ -239,9 +242,10 @@ export async function billRoutes(app: FastifyInstance, ctx: RouteContext): Promi
       db.query("SELECT DISTINCT extract(year FROM bill_month)::int AS year FROM bills"),
       getBillingSettings(db),
     ]);
-    const years = [...new Set<number>([currentYear, ...yearRows.rows.map((r) => r.year as number)])].sort((a, b) => b - a);
-    const months = Array.from({ length: 12 }, (_, i) => {
-      const month = `${q.year}-${String(i + 1).padStart(2, '0')}`;
+    // 只统计记账起始月份之后的月份：更早的用量估算与这本账无关
+    const startYear = Number(billing.startMonth.slice(0, 4));
+    const years = [...new Set<number>([currentYear, ...yearRows.rows.map((r) => r.year as number)])].filter((y) => y >= startYear || y === currentYear).sort((a, b) => b - a);
+    const months = Array.from({ length: 12 }, (_, i) => `${q.year}-${String(i + 1).padStart(2, '0')}`).filter((month) => month >= billing.startMonth).map((month) => {
       const cost = (source: string) => (estimated.rows.find((r) => r.month === month && r.source === source)?.cost as number | null | undefined) ?? null;
       return {
         month,
@@ -249,14 +253,16 @@ export async function billRoutes(app: FastifyInstance, ctx: RouteContext): Promi
         estimatedUsd: { 'claude-code': cost('claude-code'), codex: cost('codex') },
       };
     });
-    return { year: q.year, years, usdCny: billing.usdCny, months };
+    return { year: q.year, years, usdCny: billing.usdCny, startMonth: billing.startMonth, months };
   });
 
   app.get('/bills/settings', admin, async () => getBillingSettings(db));
 
   app.put('/bills/settings', admin, async (req) => {
-    const body = parse(billingSettingsSchema, req.body);
+    // 两项可以分开改：没给的那一项保持原值
+    const patch = parse(billingSettingsSchema.partial().refine((v) => Object.keys(v).length > 0, '没有需要更新的字段'), req.body ?? {});
     const before = await getBillingSettings(db);
+    const body = { ...before, ...patch };
     await putSetting(db, 'billing', body);
     await audit(db, req, 'settings.billing.update', 'settings', 'billing', { before, after: body });
     return body;

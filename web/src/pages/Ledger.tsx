@@ -1,5 +1,6 @@
 import { SwapOutlined, UploadOutlined } from '@ant-design/icons';
-import { Alert, App, Button, Card, Col, InputNumber, Popover, Row, Segmented, Select, Space, Tabs, Typography } from 'antd';
+import { Alert, App, Button, Card, Col, DatePicker, InputNumber, Popover, Row, Segmented, Select, Space, Tabs, Typography } from 'antd';
+import dayjs, { type Dayjs } from 'dayjs';
 import { useMemo, useState } from 'react';
 import { api, errorMessage } from '../api';
 import { LEDGER_SERIES, MonthlyStackChart } from '../components/charts';
@@ -16,33 +17,34 @@ import { CATEGORY_LABEL, CURRENCY_NAME, readStored, writeStored, yearStats } fro
 
 const DISPLAY_KEY = 'ledger.displayCurrency';
 
-/** 汇率：点开后修改并保存。汇率只影响展示时的换算，账单本身按原币种保存 */
-function RateControl({ usdCny, onSaved }: { usdCny: number | undefined; onSaved: () => void }) {
+/** 账目设置：汇率与记账起始月份，点开后修改并保存。汇率只影响展示时的换算，账单本身按原币种保存 */
+function RateControl({ usdCny, startMonth, onSaved }: { usdCny: number | undefined; startMonth: string | undefined; onSaved: () => void }) {
   const { message } = App.useApp();
   const [open, setOpen] = useState(false);
   const [value, setValue] = useState<number | null>(null);
+  const [start, setStart] = useState<Dayjs | null>(null);
   const [saving, setSaving] = useState(false);
   const save = async () => {
-    if (value === null) return;
+    if (value === null || !start) return;
     setSaving(true);
     try {
-      await api.put('/bills/settings', { usdCny: Math.round(value * 10000) / 10000 });
-      message.success('汇率已保存');
+      await api.put('/bills/settings', { usdCny: Math.round(value * 10000) / 10000, startMonth: start.format('YYYY-MM') });
+      message.success('账目设置已保存');
       setOpen(false);
       onSaved();
     } catch (err) { message.error(errorMessage(err)); } finally { setSaving(false); }
   };
   return (
     <Popover
-      trigger="click" placement="bottomRight" open={open} onOpenChange={(o) => { setOpen(o); if (o) setValue(usdCny ?? null); }}
-      title="人民币 / 美元汇率"
+      trigger="click" placement="bottomRight" open={open} onOpenChange={(o) => { setOpen(o); if (o) { setValue(usdCny ?? null); setStart(startMonth ? dayjs(`${startMonth}-01`) : null); } }}
+      title="账目设置"
       content={(
         <div style={{ width: 252 }}>
-          <Space.Compact style={{ display: 'flex' }}>
-            <InputNumber aria-label="1 美元折合人民币" prefix="1 美元 =" suffix="元" min={1} max={20} step={0.01} inputMode="decimal" value={value} onChange={setValue} onPressEnter={() => void save()} style={{ flex: 1, minWidth: 0 }} />
-            <Button type="primary" loading={saving} disabled={value === null} onClick={() => void save()}>保存</Button>
-          </Space.Compact>
-          <Typography.Paragraph type="secondary" style={{ fontSize: 12, margin: '8px 0 0' }}>只用于本页的金额换算；账单按录入时的币种保存，改汇率不会改动账单。</Typography.Paragraph>
+          <InputNumber aria-label="1 美元折合人民币" prefix="1 美元 =" suffix="元" min={1} max={20} step={0.01} inputMode="decimal" value={value} onChange={setValue} onPressEnter={() => void save()} style={{ width: '100%' }} />
+          <Typography.Paragraph type="secondary" style={{ fontSize: 12, margin: '4px 0 12px' }}>只用于本页的金额换算；账单按录入时的币种保存，改汇率不会改动账单。</Typography.Paragraph>
+          <DatePicker aria-label="记账起始月份" picker="month" allowClear={false} inputReadOnly value={start} onChange={setStart} prefix="起始月份" style={{ width: '100%' }} />
+          <Typography.Paragraph type="secondary" style={{ fontSize: 12, margin: '4px 0 12px' }}>从这个月开始统计：更早的月份不进统计表和图，也不能上传更早的账单。</Typography.Paragraph>
+          <Button type="primary" block loading={saving} disabled={value === null || !start} onClick={() => void save()}>保存</Button>
         </div>
       )}
     >
@@ -109,7 +111,7 @@ export function LedgerPage() {
       <PageTitle title="账目明细" extra={(
         <FilterBar items={[
           { key: 'year', half: true, node: <Select aria-label="年份" value={year} onChange={setYear} style={{ width: 110 }} options={years.map((y) => ({ value: y, label: `${y} 年` }))} /> },
-          { key: 'rate', half: true, node: <RateControl usdCny={usdCny} onSaved={summary.reload} /> },
+          { key: 'rate', half: true, node: <RateControl usdCny={usdCny} startMonth={summary.data?.startMonth} onSaved={summary.reload} /> },
           {
             key: 'currency', node: <Segmented<BillCurrency> aria-label="显示币种" value={display} onChange={(v) => { setDisplay(v); writeStored(DISPLAY_KEY, v); }}
               options={[{ value: 'CNY', label: '¥ 人民币' }, { value: 'USD', label: '$ 美元' }]} />,
@@ -132,7 +134,7 @@ export function LedgerPage() {
 
       <Card size="small" title="每月支出" extra={<Typography.Text type="secondary" style={{ fontSize: 12 }}>单位：{CURRENCY_NAME[display]}{usdCny ? ` · 按 1 美元 = ${usdCny} 元折算` : ''}</Typography.Text>} style={{ marginTop: isMobile ? 12 : 16 }} loading={summary.loading && !stats}>
         {/* 加载失败时不画“还没有账单”的空状态：上面的错误提示才是实情 */}
-        {stats && <MonthlyStackChart year={year} values={chartValues} currency={display} />}
+        {stats && <MonthlyStackChart year={year} months={current!.months.map((m) => m.month.slice(5))} values={chartValues} currency={display} />}
       </Card>
 
       <Card size="small" title="月度统计" style={{ marginTop: isMobile ? 12 : 16 }} styles={{ body: { padding: isMobile ? 0 : undefined } }}
@@ -152,7 +154,7 @@ export function LedgerPage() {
         />
       </Card>
 
-      <BillModal kind={modal?.kind ?? lastKind} editing={modal?.editing ?? null} open={modal !== null} onClose={() => setModal(null)} onSaved={onSaved} />
+      <BillModal kind={modal?.kind ?? lastKind} editing={modal?.editing ?? null} startMonth={summary.data?.startMonth} open={modal !== null} onClose={() => setModal(null)} onSaved={onSaved} />
     </>
   );
 }

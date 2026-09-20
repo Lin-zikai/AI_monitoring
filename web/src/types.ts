@@ -176,4 +176,5 @@ export interface BillSummaryMonth {
   /** ccusage 按公开 API 价格估算的同期用量价值（US$）；没有用量记录为 null */
   estimatedUsd: { 'claude-code': number | null; codex: number | null };
 }
-export interface BillSummary { year: number; years: number[]; /** 1 美元 = usdCny 元 */ usdCny: number; months: BillSummaryMonth[] }
+/** months 只含记账起始月份（startMonth）及之后的月份 */
+export interface BillSummary { year: number; years: number[]; /** 1 美元 = usdCny 元 */ usdCny: number; startMonth: string; months: BillSummaryMonth[] }

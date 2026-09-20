@@ -35,7 +35,9 @@ const toBase64 = (file: File) => new Promise<string>((resolve, reject) => {
  * 上传 / 编辑账单。kind 决定类别：VPN 固定为 vpn；AI 在 Claude Code / Codex 之间选。
  * 截图不自动上传：选中（或粘贴、拖入）的图片先留在浏览器里，保存时随表单一起以 base64 提交。
  */
-export function BillModal({ kind, editing, open, onClose, onSaved }: {
+export function BillModal({ kind, editing, startMonth, open, onClose, onSaved }: {
+  /** 记账起始月份：更早的月份不可选 */
+  startMonth?: string;
   kind: BillKind; editing: Bill | null; open: boolean; onClose: () => void; /** 保存成功；month 是这笔账单所在的月份 */ onSaved: (month: string) => void;
 }) {
   const { message } = App.useApp();
@@ -142,7 +144,7 @@ export function BillModal({ kind, editing, open, onClose, onSaved }: {
           <FormRow>
             <Form.Item name="month" label="账单月份" rules={[{ required: true, message: '请选择月份' }]} style={{ width: 200 }}>
               <DatePicker picker="month" allowClear={false} inputReadOnly={isMobile} style={{ width: '100%' }}
-                disabledDate={(d) => d.isBefore('2020-01-01') || d.isAfter(dayjs(today).add(1, 'month'), 'month')} />
+                disabledDate={(d) => d.isBefore(`${startMonth ?? '2020-01'}-01`, 'month') || d.isAfter(dayjs(today).add(1, 'month'), 'month')} />
             </Form.Item>
             <Form.Item label="金额" required style={{ width: 296 }}>
               <Space.Compact style={{ display: 'flex' }}>

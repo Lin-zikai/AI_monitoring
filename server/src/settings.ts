@@ -57,9 +57,13 @@ export const smtpSettingsSchema = z.object({
 export type SmtpSettings = z.infer<typeof smtpSettingsSchema>;
 
 /** 账目明细：人民币 / 美元换算用的汇率（1 美元 = usdCny 元）。账单金额按原币种保存，换算只发生在展示时 */
-export const billingSettingsSchema = z.object({ usdCny: z.number().min(1).max(20) });
+/** startMonth：从哪个月开始记账——更早的月份不进统计表和图，也不接受更早的账单 */
+export const billingSettingsSchema = z.object({
+  usdCny: z.number().min(1).max(20),
+  startMonth: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, '月份格式应为 YYYY-MM').refine((v) => v >= '2020-01', '起始月份不能早于 2020-01'),
+});
 export type BillingSettings = z.infer<typeof billingSettingsSchema>;
-export const DEFAULT_BILLING: BillingSettings = { usdCny: 7.2 };
+export const DEFAULT_BILLING: BillingSettings = { usdCny: 7.2, startMonth: '2026-09' };
 
 /** 入库形态：密码以 AES-GCM 密文保存，永不回显。 */
 export interface StoredSmtp extends SmtpSettings {

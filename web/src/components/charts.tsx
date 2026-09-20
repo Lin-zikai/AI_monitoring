@@ -155,14 +155,13 @@ export const LEDGER_SERIES = [
 ] as const;
 export type LedgerSeriesKey = typeof LEDGER_SERIES[number]['key'];
 
-/** 每月支出：一年 12 个月的堆叠柱状图。values 已换算成显示币种；某类别全年为 0 时仍保留图例，颜色与位置不变 */
-export function MonthlyStackChart({ year, values, currency, height = 320 }: {
-  year: number; values: Record<LedgerSeriesKey, number[]>; currency: 'CNY' | 'USD'; height?: number;
+/** 每月支出：按月的堆叠柱状图。months 是 x 轴上的月份（'01'…'12'，记账起始月份之前的不画），values 与它一一对应、已换算成显示币种；某类别全年为 0 时仍保留图例，颜色与位置不变 */
+export function MonthlyStackChart({ year, months, values, currency, height = 320 }: {
+  year: number; months: string[]; values: Record<LedgerSeriesKey, number[]>; currency: 'CNY' | 'USD'; height?: number;
 }) {
   const isMobile = useIsMobile();
   const option = useMemo<EChartsCoreOption | null>(() => {
     if (!LEDGER_SERIES.some((s) => values[s.key].some((v) => v > 0))) return null;
-    const months = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, '0'));
     return {
       textStyle: { fontFamily: FONT },
       color: LEDGER_SERIES.map((s) => s.color),
@@ -196,7 +195,7 @@ export function MonthlyStackChart({ year, values, currency, height = 320 }: {
         data: values[s.key].map((v) => Math.round(v * 100) / 100),
       })),
     };
-  }, [year, values, currency, isMobile]);
+  }, [year, months, values, currency, isMobile]);
 
   if (!option) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`${year} 年还没有账单`} style={{ padding: '48px 0' }} />;
   return <EChart option={option} height={isMobile ? Math.min(height, 260) : height} ariaLabel={`${year} 年每月支出`} />;

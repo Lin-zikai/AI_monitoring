@@ -7,6 +7,7 @@ import type { Db } from '../src/db/pool.js';
 import { hashPassword } from '../src/security/password.js';
 import { addDays, monthKey, monthRange } from '../src/util/time.js';
 import { addServer, addTarget, addUser, createTestDb, fakeExecutor, fakeQueues, masterKey, report, seedBase } from './helpers.js';
+import { DEFAULT_BILLING, putSetting } from '../src/settings.js';
 
 // 账目明细：账单的增删改查、截图的校验与读取、月度汇总（含 ccusage 估算值）、汇率设置、权限与审计
 
@@ -64,6 +65,8 @@ beforeAll(async () => {
   adminCookie = await login('admin@example.com');
   userCookie = await login('anna@example.com');
   today = (await get('/api/meta')).json().today;
+  // 下面的用例沿用各自的历史月份：把记账起始月份放到最早，起始月份本身的行为在“记账起始月份”一组里单独检验
+  await putSetting(db, 'billing', { usdCny: 7.2, startMonth: '2020-01' });
   year = Number(today.slice(0, 4));
 
   // ccusage 估算值：1 月 Claude Code 两天共 310.5、Codex 40；2 月只有 Claude Code；上一年的不计入
@@ -276,13 +279,40 @@ describe('GET /bills/summary', () => {
 
 describe('汇率设置', () => {
   it('默认 7.2；保存后汇总接口跟着变；超出 1～20 或不是数字则拒绝', async () => {
-    expect((await get('/api/bills/settings')).json()).toEqual({ usdCny: 7.2 });
-    expect((await send('PUT', '/api/bills/settings', { usdCny: 7.05 })).json()).toEqual({ usdCny: 7.05 });
-    expect((await get('/api/bills/settings')).json()).toEqual({ usdCny: 7.05 });
+    expect((await get('/api/bills/settings')).json()).toEqual({ usdCny: 7.2, startMonth: '2020-01' });
+    expect((await send('PUT', '/api/bills/settings', { usdCny: 7.05 })).json()).toEqual({ usdCny: 7.05, startMonth: '2020-01' }); // 只改汇率，起始月份不变
+    expect((await get('/api/bills/settings')).json()).toEqual({ usdCny: 7.05, startMonth: '2020-01' });
     expect((await get('/api/bills/summary')).json().usdCny).toBe(7.05);
     for (const usdCny of [0.5, 21, '7.2', null]) expect((await send('PUT', '/api/bills/settings', { usdCny })).statusCode).toBe(400);
     expect((await send('PUT', '/api/bills/settings', {})).statusCode).toBe(400);
-    expect((await get('/api/bills/settings')).json()).toEqual({ usdCny: 7.05 });
+    expect((await get('/api/bills/settings')).json()).toEqual({ usdCny: 7.05, startMonth: '2020-01' });
+  });
+});
+
+describe('记账起始月份', () => {
+  it('默认从 2026-09 开始', () => {
+    expect(DEFAULT_BILLING.startMonth).toBe('2026-09');
+  });
+
+  it('更早的月份不进汇总、不接受更早的账单；已有的旧账单仍可改其他字段；改回更早的起始月份后恢复', async () => {
+    const old = await create({ month: `${year}-02`, amount: 10 });
+    const start = `${year}-06`;
+    expect((await send('PUT', '/api/bills/settings', { startMonth: start })).json()).toMatchObject({ startMonth: start });
+
+    const s = (await get(`/api/bills/summary?year=${year}`)).json();
+    expect(s.startMonth).toBe(start);
+    expect(s.months.map((m: { month: string }) => m.month)).toEqual(['06', '07', '08', '09', '10', '11', '12'].map((m) => `${year}-${m}`));
+    expect((await get(`/api/bills/summary?year=${year - 1}`)).json().months).toEqual([]);
+
+    const early = await send('POST', '/api/bills', bill({ month: `${year}-05` }));
+    expect([early.statusCode, early.json().error]).toEqual([400, expect.stringContaining(start)]);
+    expect((await send('PATCH', `/api/bills/${old}`, { month: `${year}-03` })).statusCode).toBe(400);
+    expect((await send('PATCH', `/api/bills/${old}`, { amount: 12 })).statusCode).toBe(200);
+
+    for (const startMonth of ['2019-12', '2026-13', '2026/09', 202609]) expect((await send('PUT', '/api/bills/settings', { startMonth })).statusCode).toBe(400);
+    await send('PUT', '/api/bills/settings', { startMonth: '2020-01' });
+    expect((await get(`/api/bills/summary?year=${year}`)).json().months).toHaveLength(12);
+    await send('DELETE', `/api/bills/${old}`);
   });
 });
 
@@ -321,7 +351,7 @@ describe('权限与审计', () => {
     expect(logs[0]!.detail).toEqual({ category: 'claude-code', month: month(1), amount: 200, currency: 'USD', title: 'Max 20x', paidOn: null, note: null, attachments: [{ filename: 'pay.png', contentType: 'image/png', sizeBytes: PNG.length }] });
     expect(logs[1]!.detail).toEqual({ amount: 100, addedAttachments: [{ filename: 'new.png', contentType: 'image/png', sizeBytes: PNG.length }], removedAttachmentIds: [attId] });
     expect(logs[2]!.detail).toEqual({ category: 'claude-code', month: month(1), amount: 100, currency: 'USD', title: 'Max 20x' });
-    expect(logs[3]!.detail).toEqual({ before: { usdCny: 7.05 }, after: { usdCny: 7.3 } });
+    expect(logs[3]!.detail).toEqual({ before: { usdCny: 7.05, startMonth: '2020-01' }, after: { usdCny: 7.3, startMonth: '2020-01' } });
     const dump = JSON.stringify(logs);
     expect(dump).not.toContain(PNG.toString('base64'));
     expect(dump).not.toContain('dataBase64');
