@@ -11,12 +11,13 @@ export interface Meta {
   intervalHours: number;
   today: string;
   lastSuccessAt: string | null;
-  oldestSuccessAt: string | null;
   nextCollectionAt: string;
   targets: number;
   staleTargets: number;
   incomplete: boolean;
   sources?: string[];
+  /** 数据源的显示名与家目录下的默认目录名（后台 SOURCE_INFO） */
+  sourceInfo?: Record<string, { label: string; defaultDirName: string }>;
 }
 
 export interface Filters {
@@ -53,19 +54,22 @@ export interface Overview {
   totals: Totals;
   trend: { from: string; to: string; rows: Array<{ date: string; model: string; totalTokens: NumLike; costUsd: number | null }> };
   models: Array<{ model: string; totalTokens: NumLike; costUsd: number | null }>;
-  todayRanking: Array<{ userId: string; name: string; team: string | null; claudeTokens: NumLike; claudeCost: number | null; codexTokens: NumLike; codexCost: number | null; totalTokens: NumLike; totalCost: number | null }>;
   ranking: Array<{ userId: string; name: string; team: string | null; monthlyBudgetUsd: number | null; monthTokens: NumLike; monthCost: number | null; todayTokens: NumLike }>;
   issues: Issue[];
 }
 
+/** GET /stats/daily-ranking 的一行：分数据源的列为 null 表示该数据源当天没有任何记录 */
+export interface DailyRankRow { userId: string; name: string; team: string | null; claudeTokens: NumLike; claudeCost: number | null; codexTokens: NumLike; codexCost: number | null; totalTokens: NumLike; totalCost: number | null }
+export interface DailyRanking { date: string; today: string; earliest: string; rows: DailyRankRow[] }
+
 export interface UserListItem {
   id: string; name: string; email: string | null; role: Role; team: string | null; isActive: boolean; monthlyBudgetUsd: number | null; canLogin: boolean;
-  todayTokens: NumLike; todayCost: number; monthTokens: NumLike; monthCost: number; monthAlerts: number; targetCount: number; failingTargets: number;
+  todayTokens: NumLike; todayCost: number | null; monthTokens: NumLike; monthCost: number | null; monthAlerts: number; targetCount: number; failingTargets: number;
 }
 export interface UserListResponse { today: string; month: string; users: UserListItem[] }
 
 export interface UserAlert {
-  id: string; ruleName: string | null; metric: Metric | null; periodType: Period | null; periodKey: string | null; tier: number | null;
+  id: string; ruleName: string | null; metric: AlertMetric | null; periodType: AlertPeriod | null; periodKey: string | null; tier: number | null;
   observedValue: number | null; thresholdValue: number | null; incomplete: boolean; createdAt: string; emailStatus: EmailStatus | null; emailNote: string | null;
 }
 
@@ -97,9 +101,12 @@ export interface Target {
   lastErrorCode: string | null; lastError: string | null; consecutiveFailures: number; missingOk: boolean; dirHint: string | null; collecting: boolean; hasFlaggedData: boolean;
 }
 
+/** ccusage 的安装方式：latest = 每次采集取最新版（默认）；pinned = 平台固定版本；auto = 复用远端已装的 */
+export type InstallMode = 'latest' | 'pinned' | 'auto';
+
 export interface Server {
   id: string; name: string; host: string; port: number; sshUsername: string; credentialId: string | null; credentialName: string | null;
-  credentialRevoked: boolean; hostKeyFingerprint: string | null; collectCommand: string; defaultUserId: string | null; enabled: boolean;
+  credentialRevoked: boolean; hostKeyFingerprint: string | null; collectCommand: string; installMode: InstallMode; defaultUserId: string | null; enabled: boolean;
   lastConnectOkAt: string | null; lastError: string | null; targets: Target[];
 }
 
@@ -114,6 +121,9 @@ export interface Run {
 export type Metric = 'tokens' | 'cost' | 'budget_pct';
 export type Period = 'daily' | 'monthly';
 export type ScopeType = 'global' | 'team' | 'user';
+/** 告警记录里的指标 / 周期：除用量规则外，还有账号额度提醒（limit_used_pct，周期为额度窗口 five_hour / weekly 等） */
+export type AlertMetric = Metric | 'limit_used_pct';
+export type AlertPeriod = Period | 'five_hour' | 'weekly' | (string & {});
 export type EmailStatus = 'pending' | 'sending' | 'sent' | 'failed';
 
 export interface AlertRuleInput {
@@ -123,8 +133,8 @@ export interface AlertRuleInput {
 export interface AlertRule extends AlertRuleInput { id: string; scopeUserName: string | null; createdAt: string; updatedAt: string }
 
 export interface AlertEvent {
-  id: string; kind: 'usage' | 'collection_failure' | 'account_limit'; ruleName: string | null; userId: string | null; userName: string | null; metric: Metric | null;
-  periodType: Period | null; periodKey: string | null; tier: number | null; observedValue: number | null; thresholdValue: number | null;
+  id: string; kind: 'usage' | 'collection_failure' | 'account_limit'; source: string | null; ruleName: string | null; userId: string | null; userName: string | null; metric: AlertMetric | null;
+  periodType: AlertPeriod | null; periodKey: string | null; tier: number | null; observedValue: number | null; thresholdValue: number | null;
   dataAsOf: string | null; incomplete: boolean; emailNote: string | null; createdAt: string; serverName: string | null; dataDir: string | null;
   outboxId: string | null; emailStatus: EmailStatus | null; emailAttempts: number | null; emailSentAt: string | null; emailError: string | null; emailTo: string[] | null;
 }
@@ -136,4 +146,4 @@ export interface GeneralSettings {
 
 export interface SmtpSettings { configured: boolean; envFallback?: boolean; host?: string; port?: number; secure?: boolean; username?: string; from?: string; hasPassword?: boolean }
 
-export interface AuditLog { id: number; actorEmail: string | null; action: string; entityType: string; entityId: string | null; detail: Record<string, unknown>; ip: string | null; createdAt: string }
+export interface AuditLog { id: number | string; actorEmail: string | null; action: string; entityType: string; entityId: string | null; detail: Record<string, unknown>; ip: string | null; createdAt: string }

@@ -2,10 +2,11 @@ import { Alert, App, Button, Card, Form, Input, InputNumber, Select, Space, Swit
 import { useEffect, useState } from 'react';
 import { api, errorMessage } from '../api';
 import { useAuth } from '../auth';
-import { PageTitle } from '../components/common';
+import { CardFields, FilterBar, FormRow, LoadMore, PageTitle } from '../components/common';
 import { useMeta } from '../components/Layout';
 import { fmtTime } from '../format';
-import { useFetch } from '../hooks';
+import { useFetch, usePagedFetch } from '../hooks';
+import { useIsMobile } from '../responsive';
 import type { AuditLog, GeneralSettings, SmtpSettings } from '../types';
 
 const INTERVALS = [1, 2, 3, 4, 6, 8, 12, 24];
@@ -19,6 +20,7 @@ function GeneralTab() {
   const { data, error } = useFetch(() => api.get<GeneralSettings>('/settings/general'), []);
   const [form] = Form.useForm<GeneralSettings>();
   const [saving, setSaving] = useState(false);
+  const isMobile = useIsMobile();
   useEffect(() => { if (data) form.setFieldsValue(data); }, [data, form]);
 
   const save = async (v: GeneralSettings) => {
@@ -30,7 +32,7 @@ function GeneralTab() {
     } catch (err) { message.error(errorMessage(err)); } finally { setSaving(false); }
   };
 
-  const num = (min: number, max: number) => <InputNumber min={min} max={max} precision={0} style={{ width: 160 }} />;
+  const num = (min: number, max: number) => <InputNumber min={min} max={max} precision={0} inputMode="numeric" style={{ width: 160 }} />;
   return (
     <Card size="small">
       {error && <Alert type="error" showIcon title={error} style={{ marginBottom: 16 }} />}
@@ -49,7 +51,7 @@ function GeneralTab() {
         </Form.Item>
         <Form.Item name="failureAlertThreshold" label="连续失败通知阈值（轮）" extra="某采集目标连续失败达到该轮数时通知管理员，每段连续失败只通知一次。" rules={[{ required: true }]}>{num(1, 100)}</Form.Item>
         <Form.Item name="retentionDays" label="统计数据保留天数" extra="0 表示永久保留。超过保留期的每日统计会被定期清理。" rules={[{ required: true }]}>{num(0, 10000)}</Form.Item>
-        <Button type="primary" htmlType="submit" loading={saving}>保存</Button>
+        <Button type="primary" htmlType="submit" loading={saving} block={isMobile}>保存</Button>
       </Form>
     </Card>
   );
@@ -67,6 +69,7 @@ function SmtpTab() {
   const [saving, setSaving] = useState(false);
   const [testTo, setTestTo] = useState(user?.email ?? '');
   const [testing, setTesting] = useState(false);
+  const isMobile = useIsMobile();
 
   useEffect(() => {
     if (!data) return;
@@ -103,19 +106,19 @@ function SmtpTab() {
       )}
       <Form form={form} layout="vertical" onFinish={save} style={{ maxWidth: 560 }} autoComplete="off" disabled={!data}>
         <Form.Item label="快速预设" extra="点一下自动填好服务器、端口和加密方式；之后只需填邮箱地址和授权码。163 / QQ 邮箱的“密码”是客户端授权码（网页邮箱 设置 → POP3/SMTP/IMAP 里开启 SMTP 服务后生成），不是登录密码。">
-          <Space>
+          <Space wrap>
             {SMTP_PRESETS.map((p) => (
-              <Button key={p.label} size="small" onClick={() => form.setFieldsValue({ host: p.host, port: 465, secure: true })}>{p.label}</Button>
+              <Button key={p.label} size={isMobile ? 'middle' : 'small'} onClick={() => form.setFieldsValue({ host: p.host, port: 465, secure: true })}>{p.label}</Button>
             ))}
           </Space>
         </Form.Item>
         <Form.Item label="邮箱地址" extra="填写后自动同步到下面的“用户名”和“发件人”。">
-          <Input placeholder="yourname@163.com" autoComplete="off" onChange={(e) => { const v = e.target.value.trim(); form.setFieldsValue({ username: v, from: v ? `用量监控 <${v}>` : '' }); }} />
+          <Input placeholder="yourname@163.com" autoComplete="off" inputMode="email" autoCapitalize="none" autoCorrect="off" spellCheck={false} onChange={(e) => { const v = e.target.value.trim(); form.setFieldsValue({ username: v, from: v ? `用量监控 <${v}>` : '' }); }} />
         </Form.Item>
-        <Space size={16} align="start" style={{ display: 'flex' }}>
-          <Form.Item name="host" label="SMTP 服务器" rules={[{ required: true, message: '请输入服务器地址' }]} style={{ width: 320 }}><Input placeholder="smtp.example.com" /></Form.Item>
-          <Form.Item name="port" label="端口" rules={[{ required: true }]}><InputNumber min={1} max={65535} precision={0} /></Form.Item>
-        </Space>
+        <FormRow>
+          <Form.Item name="host" label="SMTP 服务器" rules={[{ required: true, message: '请输入服务器地址' }]} style={{ width: 320 }}><Input placeholder="smtp.example.com" inputMode="url" autoCapitalize="none" autoCorrect="off" spellCheck={false} /></Form.Item>
+          <Form.Item name="port" label="端口" rules={[{ required: true }]}><InputNumber min={1} max={65535} precision={0} inputMode="numeric" /></Form.Item>
+        </FormRow>
         <Form.Item name="secure" label="隐式 TLS（通常为 465 端口）" valuePropName="checked" extra="关闭时使用 STARTTLS 并强制升级为加密连接，不会以明文投递。"><Switch /></Form.Item>
         <Form.Item name="username" label="用户名（可选）"><Input autoComplete="off" /></Form.Item>
         <Form.Item name="password" label="密码 / 授权码" extra={data?.hasPassword ? '已保存密码（不回显）。留空表示不修改。' : '留空表示不设置密码。'}>
@@ -123,14 +126,22 @@ function SmtpTab() {
         </Form.Item>
         {data?.hasPassword && <Form.Item name="clearPassword" valuePropName="checked" label="清除已保存的密码"><Switch /></Form.Item>}
         <Form.Item name="from" label="发件人" rules={[{ required: true, message: '请输入发件人' }]}><Input placeholder="用量监控 <usage@example.com>" /></Form.Item>
-        <Button type="primary" htmlType="submit" loading={saving}>保存</Button>
+        <Button type="primary" htmlType="submit" loading={saving} block={isMobile}>保存</Button>
       </Form>
       <div style={{ marginTop: 24, paddingTop: 16, borderTop: '1px solid #f0f0f0', maxWidth: 560 }}>
         <Typography.Paragraph type="secondary">发送测试邮件（使用已保存的设置）：</Typography.Paragraph>
-        <Space.Compact style={{ width: '100%' }}>
-          <Input value={testTo} onChange={(e) => setTestTo(e.target.value)} placeholder="收件邮箱" />
-          <Button onClick={test} loading={testing} disabled={!testTo}>发送测试邮件</Button>
-        </Space.Compact>
+        {isMobile ? (
+          // 手机：输入框与按钮各占一行，邮箱地址不被按钮挤得看不全
+          <Space orientation="vertical" style={{ width: '100%' }}>
+            <Input value={testTo} onChange={(e) => setTestTo(e.target.value)} placeholder="收件邮箱" inputMode="email" autoCapitalize="none" autoCorrect="off" spellCheck={false} enterKeyHint="send" onPressEnter={() => { if (testTo) void test(); }} />
+            <Button onClick={test} loading={testing} disabled={!testTo} block>发送测试邮件</Button>
+          </Space>
+        ) : (
+          <Space.Compact style={{ width: '100%' }}>
+            <Input value={testTo} onChange={(e) => setTestTo(e.target.value)} placeholder="收件邮箱" />
+            <Button onClick={test} loading={testing} disabled={!testTo}>发送测试邮件</Button>
+          </Space.Compact>
+        )}
       </div>
     </Card>
   );
@@ -138,26 +149,51 @@ function SmtpTab() {
 
 function AuditTab() {
   const [entityType, setEntityType] = useState<string>();
-  const { data, loading, error, reload } = useFetch(() => api.get<{ logs: AuditLog[] }>('/audit', { entityType, limit: 300 }), [entityType]);
+  const isMobile = useIsMobile();
+  const { items, loading, loadingMore, hasMore, error, reload, loadMore } = usePagedFetch(
+    (offset, limit) => api.get<{ logs: AuditLog[] }>('/audit', { entityType, limit, offset }).then((r) => r.logs),
+    [entityType], 300, (l) => l.id,
+  );
   return (
     <Card size="small">
-      <Space style={{ marginBottom: 12 }}>
-        <Select allowClear placeholder="对象类型" style={{ width: 180 }} value={entityType} onChange={setEntityType}
-          options={[['user', '用户'], ['credential', '凭据'], ['server', '服务器'], ['target', '采集目标'], ['batch', '采集批次'], ['alert_rule', '告警规则'], ['email_outbox', '邮件'], ['settings', '系统设置']].map(([value, label]) => ({ value, label }))} />
-        <Button onClick={reload} loading={loading}>刷新</Button>
-      </Space>
+      <div style={{ marginBottom: 12 }}>
+        <FilterBar items={[
+          { key: 'type', half: true, node: <Select allowClear placeholder="对象类型" style={{ width: 180 }} value={entityType} onChange={setEntityType}
+            options={[['user', '用户'], ['credential', '凭据'], ['server', '服务器'], ['target', '采集目标'], ['batch', '采集批次'], ['alert_rule', '告警规则'], ['email_outbox', '邮件'], ['settings', '系统设置']].map(([value, label]) => ({ value, label }))} /> },
+          { key: 'reload', half: true, node: <Button onClick={reload} loading={loading}>刷新</Button> },
+        ]} />
+      </div>
       {error && <Alert type="error" showIcon title={error} style={{ marginBottom: 12 }} />}
       <Table<AuditLog>
-        size="small" rowKey="id" loading={loading} dataSource={data?.logs ?? []} pagination={{ pageSize: 50, hideOnSinglePage: true }} scroll={{ x: 1000 }}
-        expandable={{ expandedRowRender: (l) => <pre style={{ margin: 0, fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{JSON.stringify(l.detail, null, 2)}</pre>, rowExpandable: (l) => Object.keys(l.detail ?? {}).length > 0 }}
-        columns={[
-          { title: '时间', width: 170, render: (_v, l) => fmtTime(l.createdAt, true) },
-          { title: '操作人', dataIndex: 'actorEmail', render: (v: string | null) => v ?? '—' },
-          { title: '操作', dataIndex: 'action', render: (v: string) => <Typography.Text code>{v}</Typography.Text> },
-          { title: '对象', render: (_v, l) => `${l.entityType}${l.entityId ? ` · ${l.entityId}` : ''}`, ellipsis: true },
-          { title: 'IP', dataIndex: 'ip', width: 140, render: (v: string | null) => v ?? '—' },
-        ]}
+        size="small" rowKey="id" loading={loading} dataSource={items} pagination={{ pageSize: 50, hideOnSinglePage: true, simple: isMobile }} scroll={isMobile ? undefined : { x: 1000 }}
+        // 手机：只留一列（操作 + 时间 + 操作人），对象 / IP 放进展开行（每行都可展开）
+        expandable={{
+          expandedRowRender: (l) => (
+            <>
+              {isMobile && <div style={{ marginBottom: 8 }}><CardFields fields={[{ label: '对象', value: `${l.entityType}${l.entityId ? ` · ${l.entityId}` : ''}` }, { label: 'IP', value: l.ip ?? '—' }]} /></div>}
+              {Object.keys(l.detail ?? {}).length > 0 && <pre style={{ margin: 0, fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{JSON.stringify(l.detail, null, 2)}</pre>}
+            </>
+          ),
+          rowExpandable: (l) => isMobile || Object.keys(l.detail ?? {}).length > 0,
+        }}
+        columns={isMobile
+          ? [{
+            title: '操作 / 时间', render: (_v, l) => (
+              <div className="wrap-anywhere">
+                <Typography.Text code>{l.action}</Typography.Text>
+                <div><Typography.Text type="secondary" style={{ fontSize: 12 }}>{fmtTime(l.createdAt, true)} · {l.actorEmail ?? '—'}</Typography.Text></div>
+              </div>
+            ),
+          }]
+          : [
+            { title: '时间', width: 170, render: (_v, l) => fmtTime(l.createdAt, true) },
+            { title: '操作人', dataIndex: 'actorEmail', render: (v: string | null) => v ?? '—' },
+            { title: '操作', dataIndex: 'action', render: (v: string) => <Typography.Text code>{v}</Typography.Text> },
+            { title: '对象', render: (_v, l) => `${l.entityType}${l.entityId ? ` · ${l.entityId}` : ''}`, ellipsis: true },
+            { title: 'IP', dataIndex: 'ip', width: 140, render: (v: string | null) => v ?? '—' },
+          ]}
       />
+      <LoadMore hasMore={hasMore} loading={loadingMore} count={items.length} onClick={loadMore} />
     </Card>
   );
 }

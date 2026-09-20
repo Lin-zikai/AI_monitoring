@@ -1,6 +1,7 @@
 import { App, Form, Input, Modal } from 'antd';
 import { useState } from 'react';
 import { api, errorMessage } from '../api';
+import { validateQuietly } from '../form';
 
 export function PasswordModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [form] = Form.useForm<{ currentPassword: string; newPassword: string; confirm: string }>();
@@ -8,7 +9,8 @@ export function PasswordModal({ open, onClose }: { open: boolean; onClose: () =>
   const { message } = App.useApp();
 
   const submit = async () => {
-    const v = await form.validateFields();
+    const v = await validateQuietly(form);
+    if (!v) return;
     setSaving(true);
     try {
       await api.post('/auth/password', { currentPassword: v.currentPassword, newPassword: v.newPassword });

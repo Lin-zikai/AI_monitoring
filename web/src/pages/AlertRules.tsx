@@ -2,10 +2,12 @@ import { PlusOutlined } from '@ant-design/icons';
 import { Alert, App, Button, Checkbox, Form, Input, Modal, Radio, Select, Space, Switch, Table, Tag, Typography } from 'antd';
 import { useState } from 'react';
 import { api, errorMessage } from '../api';
-import { PageTitle } from '../components/common';
+import { validateQuietly } from '../form';
+import { FormRow, MobileCards, PageTitle } from '../components/common';
 import { fmtCost, fmtFull, METRIC_LABEL, PERIOD_LABEL } from '../format';
 import { LimitAlertCard } from '../components/LimitAlertCard';
 import { useFetch } from '../hooks';
+import { useIsMobile } from '../responsive';
 import type { AlertRule, AlertRuleInput, Filters, Metric, Period, ScopeType } from '../types';
 
 interface RuleForm {
@@ -26,6 +28,7 @@ export function AlertRulesPage() {
   const [form] = Form.useForm<RuleForm>();
   const metric = Form.useWatch('metric', form);
   const scopeType = Form.useWatch('scopeType', form);
+  const isMobile = useIsMobile();
 
   const open = (r: AlertRule | 'new') => {
     setEditing(r);
@@ -36,7 +39,8 @@ export function AlertRulesPage() {
   };
 
   const submit = async () => {
-    const v = await form.validateFields();
+    const v = await validateQuietly(form);
+    if (!v) return;
     const body: AlertRuleInput = {
       name: v.name.trim(), source: v.source === 'all' ? null : v.source, metric: v.metric, period: v.metric === 'budget_pct' ? 'monthly' : v.period, tiers: v.tiers.map(Number),
       scopeType: v.scopeType, scopeUserId: v.scopeType === 'user' ? v.scopeUserId ?? null : null, scopeTeam: v.scopeType === 'team' ? v.scopeTeam ?? null : null,
@@ -64,11 +68,25 @@ export function AlertRulesPage() {
 
   return (
     <>
-      <PageTitle title="告警规则" extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => open('new')}>新增规则</Button>} />
+      <PageTitle title="告警规则" extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => open('new')} block={isMobile}>新增规则</Button>} />
       <Alert type="info" showIcon style={{ marginBottom: 16 }}
         title="告警在每次采集成功入库后评估（含手动采集），正常情况下从用量变化到收到提醒最长约一个采集周期。每个统计周期的每个档位只提醒一次；第一版仅提醒，不会停用账户或终止任务。" />
       <LimitAlertCard />
       {rules.error && <Alert type="error" showIcon title={rules.error} style={{ marginBottom: 16 }} />}
+      {isMobile ? (
+        <MobileCards<AlertRule>
+          items={rules.data?.rules ?? []} rowKey={(r) => r.id} loading={rules.loading} emptyText="还没有告警规则"
+          title={(r) => r.name}
+          tags={(r) => <span style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6 }}><Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 400 }}>{r.enabled ? '已启用' : '已停用'}</Typography.Text><Switch checked={r.enabled} onChange={() => void toggle(r)} aria-label={`启用规则 ${r.name}`} /></span>}
+          fields={(r) => [
+            { label: '指标', value: <>{`${PERIOD_LABEL[r.period]}${METRIC_LABEL[r.metric]}`} {r.source && <Tag style={{ marginInlineEnd: 0 }}>{SOURCE_OPTIONS.find((o) => o.value === r.source)?.label ?? r.source}</Tag>}</> },
+            { label: '阈值档位', value: <Space size={4} wrap style={{ justifyContent: 'flex-end' }}>{r.tiers.map((t) => <Tag key={t} style={{ marginInlineEnd: 0 }}>{fmtTier(r.metric, t)}</Tag>)}</Space> },
+            { label: '适用范围', value: r.scopeType === 'global' ? '全部用户' : r.scopeType === 'team' ? `团队：${r.scopeTeam}` : `用户：${r.scopeUserName ?? r.scopeUserId}` },
+            { label: '收件人', block: r.extraEmails.length > 0, value: <Space size={4} wrap>{r.notifyAdmins && <Tag style={{ marginInlineEnd: 0 }}>管理员</Tag>}{r.extraEmails.map((e) => <Tag key={e} style={{ marginInlineEnd: 0, whiteSpace: 'normal' }}>{e}</Tag>)}</Space> },
+          ]}
+          actions={(r) => <><Button onClick={() => open(r)} style={{ flex: 1 }}>编辑</Button><Button danger onClick={() => remove(r)} style={{ flex: 1 }}>删除</Button></>}
+        />
+      ) : (
       <Table<AlertRule>
         size="middle" rowKey="id" loading={rules.loading} dataSource={rules.data?.rules ?? []} pagination={false} scroll={{ x: 1000 }}
         columns={[
@@ -88,11 +106,12 @@ export function AlertRulesPage() {
           { title: '操作', width: 120, render: (_v, r) => <Space size={4}><Button type="link" size="small" onClick={() => open(r)}>编辑</Button><Button type="link" size="small" danger onClick={() => remove(r)}>删除</Button></Space> },
         ]}
       />
+      )}
 
       <Modal title={editing === 'new' ? '新增告警规则' : '编辑告警规则'} open={editing !== null} onOk={submit} confirmLoading={saving} onCancel={() => setEditing(null)} destroyOnHidden width={600}>
         <Form form={form} layout="vertical" autoComplete="off">
           <Form.Item name="name" label="规则名称" rules={[{ required: true, message: '请输入名称' }]}><Input maxLength={100} placeholder="例如：月度预算提醒" /></Form.Item>
-          <Space size={16} align="start" style={{ display: 'flex' }}>
+          <FormRow>
             <Form.Item name="metric" label="指标" style={{ width: 220 }}>
               <Select
                 onChange={(m: Metric) => { if (m === 'budget_pct') form.setFieldsValue({ period: 'monthly' }); form.setFieldsValue({ tiers: m === 'budget_pct' ? ['80', '100'] : [] }); }}
@@ -102,7 +121,7 @@ export function AlertRulesPage() {
             <Form.Item name="period" label="统计周期">
               <Radio.Group disabled={metric === 'budget_pct'} options={[{ value: 'daily', label: '每日（自然日）' }, { value: 'monthly', label: '每月（自然月）' }]} />
             </Form.Item>
-          </Space>
+          </FormRow>
           <Form.Item name="source" label="数据范围" extra="选某一个数据源时，只统计该数据源的用量（例如只看 Codex 的日费用）。给某个用户单独设了规则后，同一指标和周期的全局 / 团队规则不再对他生效。">
             <Radio.Group options={[{ value: 'all', label: '全部数据源合计' }, ...SOURCE_OPTIONS]} />
           </Form.Item>

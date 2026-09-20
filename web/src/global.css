@@ -1,0 +1,150 @@
+/* 全局样式只放 antd 的响应式机制覆盖不到的部分；断点与 antd 一致：< 768px 视为手机。 */
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* < 992px（手机 / 小平板，侧栏已收进抽屉）：去掉浏览器默认的 8px body 外边距，内容贴满屏幕。
+   桌面端保持原样（原先就带着这 8px 的默认外边距） */
+@media (max-width: 991.98px) {
+  body {
+    margin: 0;
+    overscroll-behavior-y: none; /* 避免整页橡皮筋回弹带着吸顶页头一起晃 */
+  }
+}
+
+/* 去掉移动端双击缩放带来的 300ms 点击延迟；不影响双指缩放 */
+a, button, label, summary, [role='button'], [role='menuitem'], [role='tab'], [role='switch'], .ant-btn, .ant-segmented-item, .ant-select-selector {
+  touch-action: manipulation;
+}
+
+/* 整屏高度：dvh 会随移动端地址栏收起 / 展开变化，vh 作为旧浏览器的兜底 */
+.full-height {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* flex 子项默认 min-width:auto，内容（长主机名、表格）会把整页撑出横向滚动条 */
+.ant-layout, .ant-layout-content { min-width: 0; }
+
+/* 图表：纵向滑动交给页面滚动，不被画布吞掉 */
+.echart-box { touch-action: pan-y; }
+
+/* 长输出（接入步骤、错误信息、JSON 明细）在容器内换行 */
+.wrap-anywhere { overflow-wrap: anywhere; word-break: break-word; }
+.ant-modal-confirm-content { overflow-wrap: anywhere; }
+.ant-modal-confirm-content pre { max-width: 100%; overflow-x: auto; }
+
+/* 手机页头：吸顶，并让出刘海 / 圆角的安全区 */
+.app-header-mobile {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  padding-top: env(safe-area-inset-top, 0px) !important;
+  padding-left: max(4px, env(safe-area-inset-left, 0px)) !important;
+  padding-right: max(4px, env(safe-area-inset-right, 0px)) !important;
+}
+.app-content-mobile {
+  padding-left: max(12px, env(safe-area-inset-left, 0px)) !important;
+  padding-right: max(12px, env(safe-area-inset-right, 0px)) !important;
+  padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)) !important;
+}
+.app-nav-drawer .ant-drawer-header { padding-top: calc(16px + env(safe-area-inset-top, 0px)); }
+.app-nav-drawer .ant-drawer-body {
+  padding: 0 0 env(safe-area-inset-bottom, 0px) max(0px, env(safe-area-inset-left, 0px));
+  overscroll-behavior: contain;
+}
+.app-nav-drawer .ant-menu-item { height: 48px; line-height: 48px; }
+
+/* iOS Safari 在聚焦字号 < 16px 的输入框时会自动放大页面；不禁用缩放，而是把输入字号提到 16px。
+   除了窄屏，也覆盖主输入方式是触摸的设备（横屏手机、平板：宽度已超过 768px，但照样会被放大） */
+@media (max-width: 767.98px), (pointer: coarse) {
+  input, textarea, select,
+  .ant-input, .ant-input-number-input, .ant-picker-input > input, .ant-select-selection-search-input, .ant-select-input {
+    font-size: 16px !important;
+  }
+
+  /* 本身很小的可点元素（开关 22px、抽屉关闭按钮 24px、“展开全文”、复制图标）：外观不变，用透明的 ::after 把可点区域扩到 40px 以上 */
+  .ant-switch, .ant-drawer-close, .ant-typography-expand, .ant-typography-collapse, .ant-typography-copy { position: relative; }
+  .ant-switch::after, .ant-drawer-close::after, .ant-typography-expand::after, .ant-typography-collapse::after, .ant-typography-copy::after {
+    content: '';
+    position: absolute;
+    inset: -11px -6px;
+  }
+}
+
+@media (max-width: 767.98px) {
+
+  /* 对话框：接近全宽、靠上，正文在对话框内滚动（标题和按钮始终可见） */
+  .ant-modal {
+    width: calc(100vw - 16px) !important;
+    max-width: calc(100vw - 16px) !important;
+    top: calc(8px + env(safe-area-inset-top, 0px)) !important;
+    margin: 0 auto !important;
+    padding-bottom: 0 !important;
+  }
+  .ant-modal .ant-modal-container, .ant-modal .ant-modal-content { padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px)); }
+  .ant-modal .ant-modal-body {
+    max-height: calc(100vh - 172px);
+    max-height: calc(100dvh - 172px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+  .ant-modal-confirm .ant-modal-body { max-height: calc(100vh - 48px); max-height: calc(100dvh - 48px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); }
+  .ant-modal-footer .ant-btn, .ant-modal-confirm-btns .ant-btn { min-width: 88px; }
+
+  /* 抽屉：正文滚动不带动背后的页面，并让出底部安全区 */
+  .ant-drawer .ant-drawer-body { overscroll-behavior: contain; padding: 12px 12px calc(12px + env(safe-area-inset-bottom, 0px)); }
+  .ant-drawer .ant-drawer-header { padding: calc(12px + env(safe-area-inset-top, 0px)) 12px 12px; }
+
+  /* 纵排表单里写死宽度的表单项 / 控件改为占满一行 */
+  .ant-form-vertical .ant-form-item { width: 100% !important; }
+  .ant-form-vertical .ant-form-item-control-input-content > .ant-input-number,
+  .ant-form-vertical .ant-form-item-control-input-content > .ant-picker,
+  .ant-form-vertical .ant-form-item-control-input-content > .ant-select { width: 100% !important; min-width: 0 !important; }
+  .ant-form-vertical .ant-radio-wrapper, .ant-form-vertical .ant-checkbox-wrapper { min-height: 28px; align-items: center; }
+
+  /* 筛选栏（FilterBar）：控件占满所在格 */
+  .filter-bar-mobile .ant-select, .filter-bar-mobile .ant-picker, .filter-bar-mobile .ant-segmented, .filter-bar-mobile .ant-btn { width: 100% !important; }
+  .filter-bar-mobile .ant-segmented .ant-segmented-group { display: flex; }
+  .filter-bar-mobile .ant-segmented .ant-segmented-item { flex: 1; }
+
+  /* 小号卡片的标题区：标题与右侧操作放不下时换行，而不是互相挤压 */
+  .ant-card-small > .ant-card-head > .ant-card-head-wrapper { flex-wrap: wrap; row-gap: 4px; padding: 8px 0; }
+  .ant-card-small > .ant-card-head .ant-card-head-title { white-space: normal; padding: 0; }
+  .ant-card-small > .ant-card-head .ant-card-extra { padding: 0; }
+
+  /* 表格：万一内容比屏幕宽，只让表格区域自己横向滚动，不把整页撑宽 */
+  .ant-table-wrapper .ant-table-content { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  /* 数字 / 金额单元格不折行 */
+  .ant-table-wrapper td.ant-table-cell[style*='text-align: right'], .ant-table-wrapper td.ant-table-cell[style*='text-align:right'] { white-space: nowrap; }
+  /* 小号表格留出更紧凑的内边距 */
+  .ant-table-wrapper .ant-table.ant-table-small .ant-table-cell { padding: 8px 6px; }
+  .ant-tabs .ant-tabs-tab { padding: 12px 4px; }
+
+  /* 日期面板：手机上固定在屏幕正中（像底部弹层那样），不跟着输入框定位——
+     输入框靠近屏幕上下边缘、或在对话框里时，跟随定位的面板会被裁掉月份切换栏 */
+  .ant-picker-dropdown {
+    position: fixed !important;
+    inset: 0 !important;
+    margin: auto !important;
+    width: fit-content;
+    height: fit-content;
+    max-width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+    max-height: calc(100dvh - 16px);
+  }
+  .ant-picker-dropdown .ant-picker-range-arrow { display: none; }
+  /* 快捷项（今天 / 昨天…）从左侧一列改成面板上方的一行 */
+  .ant-picker-dropdown .ant-picker-panel-layout { flex-direction: column; }
+  .ant-picker-dropdown .ant-picker-presets { flex: none; min-width: 0 !important; max-width: none !important; }
+  .ant-picker-dropdown .ant-picker-presets ul { display: flex; flex: none !important; gap: 8px; height: auto !important; overflow-x: auto; border-inline-end: 0 !important; border-bottom: 1px solid #f0f0f0; }
+  .ant-picker-dropdown .ant-picker-presets ul li { flex: none; margin: 0 !important; border: 1px solid #d9d9d9; padding: 6px 12px !important; line-height: 20px; }
+
+  .ant-message { top: calc(8px + env(safe-area-inset-top, 0px)) !important; }
+  .ant-message .ant-message-notice-content { max-width: calc(100vw - 32px); overflow-wrap: anywhere; text-align: start; }
+}

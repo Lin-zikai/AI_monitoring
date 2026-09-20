@@ -10,7 +10,10 @@ echarts.use([BarChart, GridComponent, LegendComponent, TooltipComponent, CanvasR
 
 interface Props { option: EChartsCoreOption; height?: number; ariaLabel?: string }
 
-/** ECharts 的最小 React 包装：随容器尺寸自适应，卸载时释放实例。 */
+/**
+ * ECharts 的最小 React 包装：随容器尺寸自适应（ResizeObserver 同时覆盖窗口缩放、侧栏收放与手机横竖屏切换），卸载时释放实例。
+ * 容器带 touch-action: pan-y（global.css 的 .echart-box）：在图表上纵向滑动时页面照常滚动，点按显示 tooltip。
+ */
 export function EChart({ option, height = 320, ariaLabel }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const chartRef = useRef<echarts.ECharts | null>(null);
@@ -34,5 +37,5 @@ export function EChart({ option, height = 320, ariaLabel }: Props) {
     chartRef.current?.setOption(option, { notMerge: true });
   }, [option]);
 
-  return <div ref={ref} role="img" aria-label={ariaLabel} style={{ width: '100%', height }} />;
+  return <div ref={ref} className="echart-box" role="img" aria-label={ariaLabel} style={{ width: '100%', height }} />;
 }
