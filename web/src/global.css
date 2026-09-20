@@ -58,6 +58,9 @@ a, button, label, summary, [role='button'], [role='menuitem'], [role='tab'], [ro
 }
 .app-nav-drawer .ant-menu-item { height: 48px; line-height: 48px; }
 
+/* 账目明细：四张统计卡等高（提示文字有长有短） */
+.ledger-stats .ant-card { height: 100%; }
+
 /* iOS Safari 在聚焦字号 < 16px 的输入框时会自动放大页面；不禁用缩放，而是把输入字号提到 16px。
    除了窄屏，也覆盖主输入方式是触摸的设备（横屏手机、平板：宽度已超过 768px，但照样会被放大） */
 @media (max-width: 767.98px), (pointer: coarse) {
@@ -144,6 +147,15 @@ a, button, label, summary, [role='button'], [role='menuitem'], [role='tab'], [ro
   .ant-picker-dropdown .ant-picker-presets { flex: none; min-width: 0 !important; max-width: none !important; }
   .ant-picker-dropdown .ant-picker-presets ul { display: flex; flex: none !important; gap: 8px; height: auto !important; overflow-x: auto; border-inline-end: 0 !important; border-bottom: 1px solid #f0f0f0; }
   .ant-picker-dropdown .ant-picker-presets ul li { flex: none; margin: 0 !important; border: 1px solid #d9d9d9; padding: 6px 12px !important; line-height: 20px; }
+
+  /* 账目明细的截图上传：卡片收到 96px，360px 宽的对话框里一行放得下 3 张；预览 / 删除图标的可点区域放大到 40px，并且不靠悬停、直接显示 */
+  .ledger-upload.ant-upload-wrapper.ant-upload-picture-card-wrapper .ant-upload-list .ant-upload-list-item-container,
+  .ledger-upload.ant-upload-wrapper.ant-upload-picture-card-wrapper .ant-upload.ant-upload-select { width: 96px; height: 96px; }
+  .ledger-upload .ant-upload-list-item .ant-upload-list-item-actions { opacity: 1 !important; display: flex; justify-content: center; white-space: nowrap; }
+  .ledger-upload .ant-upload-list-item .ant-upload-list-item-actions .anticon { color: #fff !important; font-size: 18px; }
+  .ledger-upload .ant-upload-list-item .ant-upload-list-item-actions > a,
+  .ledger-upload .ant-upload-list-item .ant-upload-list-item-actions > button { width: 38px !important; height: 40px !important; display: inline-flex; align-items: center; justify-content: center; margin: 0 !important; opacity: 1 !important; background: transparent !important; }
+  .ledger-upload .ant-upload-list-item::before { opacity: 1 !important; background: rgba(0, 0, 0, 0.4) !important; }
 
   .ant-message { top: calc(8px + env(safe-area-inset-top, 0px)) !important; }
   .ant-message .ant-message-notice-content { max-width: calc(100vw - 32px); overflow-wrap: anywhere; text-align: start; }

@@ -1,5 +1,5 @@
 import {
-  AlertOutlined, BarChartOutlined, BellOutlined, CloudServerOutlined, DashboardOutlined, KeyOutlined, LogoutOutlined,
+  AccountBookOutlined, AlertOutlined, BarChartOutlined, BellOutlined, CloudServerOutlined, DashboardOutlined, KeyOutlined, LogoutOutlined,
   MenuOutlined, SettingOutlined, TeamOutlined, UserOutlined, WarningFilled,
 } from '@ant-design/icons';
 import { Alert, Button, Drawer, Dropdown, Layout, Menu, Space, Spin, Typography } from 'antd';
@@ -52,6 +52,7 @@ export function AppLayout() {
     ? [
       { key: '/', icon: <DashboardOutlined />, label: '总览仪表盘' },
       { key: '/usage', icon: <BarChartOutlined />, label: '用量分析' },
+      { key: '/ledger', icon: <AccountBookOutlined />, label: '账目明细' },
       { key: '/users', icon: <TeamOutlined />, label: '用户列表' },
       { key: '/servers', icon: <CloudServerOutlined />, label: '服务器管理' },
       { key: '/alerts/rules', icon: <AlertOutlined />, label: '告警规则' },

@@ -10,6 +10,7 @@ import { LoginPage } from './pages/Login';
 const AlertEventsPage = lazy(() => import('./pages/AlertEvents').then((m) => ({ default: m.AlertEventsPage })));
 const AlertRulesPage = lazy(() => import('./pages/AlertRules').then((m) => ({ default: m.AlertRulesPage })));
 const DashboardPage = lazy(() => import('./pages/Dashboard').then((m) => ({ default: m.DashboardPage })));
+const LedgerPage = lazy(() => import('./pages/Ledger').then((m) => ({ default: m.LedgerPage })));
 const ServersPage = lazy(() => import('./pages/servers/ServersPage').then((m) => ({ default: m.ServersPage })));
 const SettingsPage = lazy(() => import('./pages/Settings').then((m) => ({ default: m.SettingsPage })));
 const UsagePage = lazy(() => import('./pages/Usage').then((m) => ({ default: m.UsagePage })));
@@ -54,6 +55,7 @@ function AppRoutes() {
       <Route element={<RequireAuth><AppLayout /></RequireAuth>}>
         <Route path="/" element={<Home />} />
         <Route path="/usage" element={<AdminOnly><UsagePage /></AdminOnly>} />
+        <Route path="/ledger" element={<AdminOnly><LedgerPage /></AdminOnly>} />
         <Route path="/users" element={<AdminOnly><UsersPage /></AdminOnly>} />
         <Route path="/users/:id" element={<UserDetailPage />} />
         <Route path="/servers" element={<AdminOnly><ServersPage /></AdminOnly>} />

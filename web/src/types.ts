@@ -155,3 +155,25 @@ export interface GeneralSettings {
 export interface SmtpSettings { configured: boolean; envFallback?: boolean; host?: string; port?: number; secure?: boolean; username?: string; from?: string; hasPassword?: boolean }
 
 export interface AuditLog { id: number | string; actorEmail: string | null; action: string; entityType: string; entityId: string | null; detail: Record<string, unknown>; ip: string | null; createdAt: string }
+
+// 账目明细（/bills）：金额保持原币种，人民币 / 美元换算在前端按 usdCny 进行
+export type BillCategory = 'vpn' | 'claude-code' | 'codex';
+export type BillCurrency = 'CNY' | 'USD';
+export interface BillAttachment { id: string; filename: string; contentType: string; sizeBytes: number }
+export interface Bill {
+  id: string; category: BillCategory; /** YYYY-MM */ month: string; amount: number; currency: BillCurrency; title: string | null; paidOn: string | null; note: string | null;
+  createdAt: string; createdByName: string | null; attachments: BillAttachment[];
+}
+export interface BillAttachmentInput { filename: string; contentType: string; dataBase64: string }
+export interface BillInput {
+  category: BillCategory; month: string; amount: number; currency: BillCurrency; title: string | null; paidOn: string | null; note: string | null;
+  /** 新建时用 */ attachments?: BillAttachmentInput[];
+  /** 编辑时用 */ addAttachments?: BillAttachmentInput[]; removeAttachmentIds?: string[];
+}
+export interface BillSummaryMonth {
+  month: string;
+  items: Array<{ category: BillCategory; currency: BillCurrency; amount: number; count: number }>;
+  /** ccusage 按公开 API 价格估算的同期用量价值（US$）；没有用量记录为 null */
+  estimatedUsd: { 'claude-code': number | null; codex: number | null };
+}
+export interface BillSummary { year: number; years: number[]; /** 1 美元 = usdCny 元 */ usdCny: number; months: BillSummaryMonth[] }

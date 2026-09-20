@@ -79,11 +79,14 @@ export function ServersPage() {
   /** 刚触发了采集：刷新并开始跟进 */
   const reloadAndWatch = () => { setQueuedAt(Date.now()); reload(); };
 
-  // ---- 展开行：首次拿到数据时全部展开，之后出现的新服务器也默认展开；其余完全听用户的
+  // ---- 展开行：默认全部收起（失败的目标数在收起的行上就能看到），要调整时再点开；
+  //      只有在本页刚添加的服务器自动展开一次，方便看接入结果。其余完全听用户的
   const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
-  const seenServers = useRef(new Set<string>());
+  const seenServers = useRef<Set<string> | null>(null);
   useEffect(() => {
-    const fresh = list.map((s) => s.id).filter((id) => !seenServers.current.has(id));
+    if (!servers.data) return;
+    if (!seenServers.current) { seenServers.current = new Set(list.map((s) => s.id)); return; }
+    const fresh = list.map((s) => s.id).filter((id) => !seenServers.current!.has(id));
     if (fresh.length === 0) return;
     for (const id of fresh) seenServers.current.add(id);
     setExpandedKeys((prev) => [...prev, ...fresh]);

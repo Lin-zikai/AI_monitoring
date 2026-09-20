@@ -30,6 +30,16 @@ export const fmtCost = (v: NumLike | undefined) => {
   return n === null ? UNKNOWN : `US$ ${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };
 
+// 账目明细的金额：与 fmtCost 同一风格（符号 + 空格 + 千分位 + 两位小数）
+const MONEY_PREFIX = { CNY: '¥', USD: 'US$' } as const;
+export const fmtMoney = (v: number, currency: 'CNY' | 'USD') =>
+  `${v < 0 ? '−' : ''}${MONEY_PREFIX[currency]} ${Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+/** 紧凑写法：图表坐标轴、手机上的窄表格用。不带小数，过万用“万”缩写（¥1,440 / $1.2万） */
+export const fmtMoneyCompact = (v: number, currency: 'CNY' | 'USD') => {
+  const abs = Math.abs(v);
+  return `${v < 0 ? '−' : ''}${currency === 'CNY' ? '¥' : '$'}${abs >= 1e4 ? compact(abs) : Math.round(abs).toLocaleString('en-US')}`;
+};
+
 export function fmtTime(iso: string | null | undefined, withSeconds = false): string {
   if (!iso) return '—';
   const d = new Date(iso);

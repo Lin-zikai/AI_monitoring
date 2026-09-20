@@ -13,6 +13,7 @@ import type { RemoteExecutor } from '../ssh/client.js';
 import { HttpError } from './http.js';
 import { alertRoutes } from './routes/alerts.js';
 import { authRoutes } from './routes/auth.js';
+import { billRoutes } from './routes/bills.js';
 import { serverRoutes } from './routes/servers.js';
 import { settingsRoutes } from './routes/settings.js';
 import { statsRoutes } from './routes/stats.js';
@@ -123,6 +124,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     await statsRoutes(api, ctx);
     await alertRoutes(api, ctx);
     await settingsRoutes(api, ctx);
+    await billRoutes(api, ctx);
   }, { prefix: '/api' });
 
   app.get('/healthz', async () => {

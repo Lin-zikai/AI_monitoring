@@ -56,6 +56,11 @@ export const smtpSettingsSchema = z.object({
 });
 export type SmtpSettings = z.infer<typeof smtpSettingsSchema>;
 
+/** 账目明细：人民币 / 美元换算用的汇率（1 美元 = usdCny 元）。账单金额按原币种保存，换算只发生在展示时 */
+export const billingSettingsSchema = z.object({ usdCny: z.number().min(1).max(20) });
+export type BillingSettings = z.infer<typeof billingSettingsSchema>;
+export const DEFAULT_BILLING: BillingSettings = { usdCny: 7.2 };
+
 /** 入库形态：密码以 AES-GCM 密文保存，永不回显。 */
 export interface StoredSmtp extends SmtpSettings {
   passwordSealed?: { ciphertext: string; iv: string; authTag: string };
@@ -79,6 +84,10 @@ export async function getGeneralSettings(db: Queryable): Promise<GeneralSettings
 
 export async function getLimitAlertSettings(db: Queryable): Promise<LimitAlertSettings> {
   return { ...DEFAULT_LIMIT_ALERT, ...(await getSetting<Partial<LimitAlertSettings>>(db, 'limitAlert')) };
+}
+
+export async function getBillingSettings(db: Queryable): Promise<BillingSettings> {
+  return { ...DEFAULT_BILLING, ...(await getSetting<Partial<BillingSettings>>(db, 'billing')) };
 }
 
 export const getStoredSmtp = (db: Queryable) => getSetting<StoredSmtp>(db, 'smtp');

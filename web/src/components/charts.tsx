@@ -1,7 +1,7 @@
 import { Empty } from 'antd';
 import type { EChartsCoreOption } from 'echarts/core';
 import { useMemo } from 'react';
-import { compact, escapeHtml, fmtCost, fmtFull } from '../format';
+import { compact, escapeHtml, fmtCost, fmtFull, fmtMoney, fmtMoneyCompact } from '../format';
 import { useIsMobile } from '../responsive';
 import { EChart } from './EChart';
 
@@ -145,6 +145,61 @@ export function StackedTrendChart({ points, from, to, metric, namespace, height 
 
   if (!option) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={emptyText} style={{ padding: '48px 0' }} />;
   return <EChart option={option} height={isMobile ? Math.min(height, 260) : height} ariaLabel={ariaLabel} />;
+}
+
+/** 账目明细的类别色：固定顺序、固定颜色（取自上面的分类色板，已用 validate_palette.js 校验，色觉障碍下可区分）；页面里的类别标记也用它 */
+export const LEDGER_SERIES = [
+  { key: 'vpn', label: 'VPN', color: '#4a3aa7' },
+  { key: 'claude-code', label: 'Claude Code', color: '#2a78d6' },
+  { key: 'codex', label: 'Codex', color: '#1baf7a' },
+] as const;
+export type LedgerSeriesKey = typeof LEDGER_SERIES[number]['key'];
+
+/** 每月支出：一年 12 个月的堆叠柱状图。values 已换算成显示币种；某类别全年为 0 时仍保留图例，颜色与位置不变 */
+export function MonthlyStackChart({ year, values, currency, height = 320 }: {
+  year: number; values: Record<LedgerSeriesKey, number[]>; currency: 'CNY' | 'USD'; height?: number;
+}) {
+  const isMobile = useIsMobile();
+  const option = useMemo<EChartsCoreOption | null>(() => {
+    if (!LEDGER_SERIES.some((s) => values[s.key].some((v) => v > 0))) return null;
+    const months = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, '0'));
+    return {
+      textStyle: { fontFamily: FONT },
+      color: LEDGER_SERIES.map((s) => s.color),
+      legend: isMobile
+        ? { bottom: 0, left: 0, icon: 'roundRect', itemWidth: 10, itemHeight: 10, itemGap: 12, textStyle: { color: INK.secondary, fontSize: 11 } }
+        : { top: 0, left: 0, icon: 'roundRect', itemWidth: 10, itemHeight: 10, textStyle: { color: INK.secondary } },
+      grid: isMobile ? { left: 4, right: 8, top: 12, bottom: 32, containLabel: true } : { left: 8, right: 16, top: 40, bottom: 8, containLabel: true },
+      tooltip: {
+        confine: true,
+        ...(isMobile ? MOBILE_TOOLTIP : {}),
+        trigger: 'axis', axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(11,11,11,0.04)' } },
+        backgroundColor: '#fff', borderColor: 'rgba(11,11,11,0.10)', textStyle: { color: INK.primary, fontFamily: FONT, fontSize: 12 },
+        formatter: (params: unknown) => {
+          const items = (params as Array<{ axisValue: string; seriesName: string; value: number; color: string }>);
+          if (!items.length) return '';
+          const present = items.filter((i) => i.value > 0); // 保持类别的固定顺序，不按金额重排
+          const total = present.reduce((acc, i) => acc + i.value, 0);
+          const rows = present.map((i) =>
+            `<div style="display:flex;justify-content:space-between;gap:24px"><span><span style="display:inline-block;width:10px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px;background:${i.color}"></span><span style="color:${INK.secondary}">${escapeHtml(i.seriesName)}</span></span><b style="white-space:nowrap">${fmtMoney(i.value, currency)}</b></div>`);
+          return `<div style="margin-bottom:4px;color:${INK.secondary}">${year} 年 ${Number(items[0]!.axisValue)} 月</div>`
+            + (present.length === 0 ? `<span style="color:${INK.muted}">没有账单</span>`
+              : `<div style="display:flex;justify-content:space-between;gap:24px;margin-bottom:4px"><span>合计</span><b style="white-space:nowrap">${fmtMoney(total, currency)}</b></div>${rows.join('')}`);
+        },
+      },
+      xAxis: { type: 'category', data: months, ...baseAxisStyle, splitLine: { show: false }, axisLabel: { ...baseAxisStyle.axisLabel, interval: 0, ...(isMobile ? { fontSize: 10 } : {}) } },
+      yAxis: { type: 'value', ...baseAxisStyle, ...(isMobile ? { splitNumber: 4 } : {}), axisLine: { show: false }, axisLabel: { ...baseAxisStyle.axisLabel, ...(isMobile ? { fontSize: 10 } : {}), formatter: (v: number) => fmtMoneyCompact(v, currency) } },
+      series: LEDGER_SERIES.map((s) => ({
+        name: s.label, type: 'bar', stack: 'total', barMaxWidth: 40,
+        itemStyle: { borderColor: INK.surface, borderWidth: 1 },
+        emphasis: { focus: 'series' },
+        data: values[s.key].map((v) => Math.round(v * 100) / 100),
+      })),
+    };
+  }, [year, values, currency, isMobile]);
+
+  if (!option) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`${year} 年还没有账单`} style={{ padding: '48px 0' }} />;
+  return <EChart option={option} height={isMobile ? Math.min(height, 260) : height} ariaLabel={`${year} 年每月支出`} />;
 }
 
 export interface RankItem { key: string; label: string; value: number | null }

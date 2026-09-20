@@ -25,6 +25,7 @@ docker compose logs -f api collector mailer
 - `secrets/master_key` 是 SSH 私钥与 SMTP 密码的主加密密钥，**不在数据库里，也不在 `.env` 里**。丢失后所有已保存的凭据无法解密，只能重新录入。
 - 首次登录后修改管理员密码，并从 `.env` 删除 `ADMIN_PASSWORD`。
 - 内网无公网证书时，把 `deploy/Caddyfile` 的站点块加上 `tls internal`，或挂载自有证书。
+- “账目明细”里上传的账单截图存放在数据库中（每张不超过 5 MB、每笔账单最多 4 张），随数据库备份一起保存，不需要额外的文件卷；上传请求最大约 30 MB，前面另有反向代理时注意放宽它的请求体上限（随附的 Caddy 配置不限制）。
 - `POSTGRES_PASSWORD` 必填（未设置时 Compose 拒绝启动），会被拼进连接串，请用 URL 安全的字符：`openssl rand -hex 24`。
 - `TRUST_PROXY` 决定是否采信 `X-Forwarded-For`：Compose 部署默认 `1`（只信任 Caddy 这一跳）；不经反向代理直接暴露 API 时保持默认的 `false`，否则客户端可以伪造来源 IP 绕过登录限速。
 - 登录会话可吊销：修改或重置密码、调整角色、停用账户、退出登录都会让该账户已签发的会话立即失效。升级到带此功能的版本后，所有人需要重新登录一次。
