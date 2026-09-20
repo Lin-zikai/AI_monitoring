@@ -224,6 +224,21 @@ export type CollectEnvelope = z.infer<typeof collectEnvelope>;
 // 远端错误码中值得退避重试的（瞬时故障）；目录缺失、权限、参数类错误重试无意义
 const RETRYABLE_REMOTE_CODES = new Set(['CCUSAGE_FAILED', 'CCUSAGE_TIMEOUT']);
 
+/** 远端错误码的说明：远端脚本自带 message 时用它的；没带（旧版脚本、被截断）时用这里的，界面上不至于只剩一个英文代号 */
+export const REMOTE_ERROR_TEXT: Record<string, string> = {
+  DIR_MISSING: '数据目录不存在',
+  DIR_UNREADABLE: '采集账户没有权限访问数据目录（或它的上级目录）',
+  DIR_NOT_ALLOWED: '目录不在远端采集脚本的白名单内',
+  CONFIG_MISSING: '远端采集脚本读不到自己的配置文件',
+  CCUSAGE_MISSING: '远端找不到 ccusage',
+  CCUSAGE_TIMEOUT: '远端 ccusage 执行超时',
+  CCUSAGE_FAILED: '远端 ccusage 执行失败',
+  CCUSAGE_VERSION_MISMATCH: '远端 ccusage 版本与配置要求的不一致',
+  ACCOUNT_QUERIES_DISABLED: '远端采集配置未开启账号额度查询',
+};
+export const remoteErrorText = (code: string, message: string | undefined, fallback: string) =>
+  message?.trim() || (Object.hasOwn(REMOTE_ERROR_TEXT, code) ? REMOTE_ERROR_TEXT[code]! : fallback);
+
 export interface CollectRequest { source: string; dir: string; since: string; until: string; timezone: string }
 
 export function parseEnvelope(stdout: string, req: CollectRequest): CollectEnvelope & { status: 'ok' } {
@@ -238,7 +253,7 @@ export function parseEnvelope(stdout: string, req: CollectRequest): CollectEnvel
   const e = env.data;
   if (e.status === 'error') {
     const code = e.code ?? 'REMOTE_ERROR';
-    throw new CollectError(code, e.message ?? '远端采集失败', RETRYABLE_REMOTE_CODES.has(code));
+    throw new CollectError(code, remoteErrorText(code, e.message, '远端采集失败'), RETRYABLE_REMOTE_CODES.has(code));
   }
   // 回显必须与请求一致，防止错位的结果被入库到别的目标/范围
   if (e.source !== req.source || e.dir !== req.dir || e.since !== req.since || e.until !== req.until || e.timezone !== req.timezone) {

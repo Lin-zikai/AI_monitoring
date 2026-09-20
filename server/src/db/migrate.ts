@@ -10,6 +10,8 @@ export async function migrate(db: Db, dir = MIGRATIONS_DIR): Promise<string[]> {
   const client = await db.connect();
   const applied: string[] = [];
   try {
+    // 迁移（建索引、回填）与等待迁移锁都可能超过连接池默认的语句超时，只在这个会话里关闭
+    await client.query('SET statement_timeout = 0');
     // API 与各 Worker 可能同时启动，串行化迁移
     await client.query('SELECT pg_advisory_lock($1)', [LOCK_KEY]);
     await client.query(
@@ -32,6 +34,7 @@ export async function migrate(db: Db, dir = MIGRATIONS_DIR): Promise<string[]> {
     }
   } finally {
     await client.query('SELECT pg_advisory_unlock($1)', [LOCK_KEY]).catch(() => undefined);
+    await client.query('RESET statement_timeout').catch(() => undefined); // 连接归还连接池前恢复默认限制
     client.release();
   }
   return applied;

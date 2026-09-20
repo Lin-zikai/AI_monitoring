@@ -4,8 +4,8 @@ import { hashPassword } from '../../security/password.js';
 import { getGeneralSettings } from '../../settings.js';
 import { dateInTz, monthKey, monthRange } from '../../util/time.js';
 import type { RouteContext } from '../app.js';
-import { audit, currentUser, HttpError, mapDbError, notFound, parse } from '../http.js';
-import { passwordSchema } from './auth.js';
+import { audit, currentUser, HttpError, mapDbError, mapDeleteError, notFound, parse } from '../http.js';
+import { issueSession, passwordSchema } from './auth.js';
 
 const budget = z.number().nonnegative().max(1e9).nullable();
 // 邮箱可选：空字符串视为不填
@@ -31,6 +31,9 @@ const patchSchema = z.object({
 
 export const idParam = z.object({ id: z.string().uuid() });
 
+// 区间内没有任何用量行 = 确实没用，记 0；有行但数值全为 NULL = 未知，保持 NULL
+const USAGE_SUMS = `CASE WHEN count(*) = 0 THEN 0 ELSE sum(total_tokens) END::bigint AS tokens, CASE WHEN count(*) = 0 THEN 0 ELSE sum(cost_usd) END AS cost`;
+
 export async function userRoutes(app: FastifyInstance, ctx: RouteContext): Promise<void> {
   const { db } = ctx;
 
@@ -44,8 +47,8 @@ export async function userRoutes(app: FastifyInstance, ctx: RouteContext): Promi
               d.tokens AS "todayTokens", d.cost::float8 AS "todayCost", m.tokens AS "monthTokens", m.cost::float8 AS "monthCost",
               COALESCE(a.n, 0)::int AS "monthAlerts", COALESCE(t.n, 0)::int AS "targetCount", COALESCE(t.failing, 0)::int AS "failingTargets"
          FROM users u
-         LEFT JOIN LATERAL (SELECT sum(total_tokens)::bigint AS tokens, sum(cost_usd) AS cost FROM usage_daily WHERE user_id = u.id AND usage_date = $1::date) d ON true
-         LEFT JOIN LATERAL (SELECT sum(total_tokens)::bigint AS tokens, sum(cost_usd) AS cost FROM usage_daily WHERE user_id = u.id AND usage_date BETWEEN $2::date AND $3::date) m ON true
+         LEFT JOIN LATERAL (SELECT ${USAGE_SUMS} FROM usage_daily WHERE user_id = u.id AND usage_date = $1::date) d ON true
+         LEFT JOIN LATERAL (SELECT ${USAGE_SUMS} FROM usage_daily WHERE user_id = u.id AND usage_date BETWEEN $2::date AND $3::date) m ON true
          LEFT JOIN LATERAL (SELECT count(*) AS n FROM alert_events WHERE user_id = u.id AND kind = 'usage' AND period_key IN ($1::text, $4::text)) a ON true
          LEFT JOIN LATERAL (SELECT count(*) AS n, count(*) FILTER (WHERE last_status = 'failed') AS failing FROM collection_targets WHERE user_id = u.id AND enabled) t ON true
         ORDER BY "monthCost" DESC NULLS LAST, u.name`,
@@ -67,12 +70,12 @@ export async function userRoutes(app: FastifyInstance, ctx: RouteContext): Promi
     return reply.status(201).send({ id });
   });
 
-  app.patch('/users/:id', { preHandler: ctx.requireAdmin }, async (req) => {
+  app.patch('/users/:id', { preHandler: ctx.requireAdmin }, async (req, reply) => {
     const { id } = parse(idParam, req.params);
     const body = parse(patchSchema, req.body);
     const me = currentUser(req);
     if (id === me.id && (body.role === 'user' || body.isActive === false)) throw new HttpError(400, '不能降级或停用自己的管理员账户');
-    const current = (await db.query('SELECT email, role, (password_hash IS NOT NULL) AS can_login FROM users WHERE id = $1', [id])).rows[0];
+    const current = (await db.query('SELECT email, role, is_active, (password_hash IS NOT NULL) AS can_login FROM users WHERE id = $1', [id])).rows[0];
     if (!current) throw notFound('用户');
     const nextEmail = body.email !== undefined ? body.email : current.email;
     if (!nextEmail && (body.password || current.can_login || (body.role ?? current.role) === 'admin')) throw new HttpError(400, '管理员或可登录的账户必须填写邮箱（邮箱即登录名）');
@@ -88,11 +91,16 @@ export async function userRoutes(app: FastifyInstance, ctx: RouteContext): Promi
     if (body.isActive !== undefined) set('is_active', body.isActive);
     if (body.password !== undefined) set('password_hash', await hashPassword(body.password));
     if (sets.length === 0) throw new HttpError(400, '没有需要更新的字段');
+    // 重置密码、改角色、停用：吊销该用户已签发的全部会话令牌
+    const revoke = body.password !== undefined || (body.role !== undefined && body.role !== current.role) || (body.isActive === false && current.is_active);
+    if (revoke) sets.push('token_version = token_version + 1');
 
-    const res = await db.query(`UPDATE users SET ${sets.join(', ')}, updated_at = now() WHERE id = $1 RETURNING id`, values).catch(mapDbError);
+    const res = await db.query(`UPDATE users SET ${sets.join(', ')}, updated_at = now() WHERE id = $1 RETURNING token_version`, values).catch(mapDbError);
     if (res.rowCount === 0) throw notFound('用户');
+    // 管理员在这里重置自己的密码时，给当前会话换发令牌，避免把自己踢下线
+    if (revoke && id === me.id) await issueSession(reply, ctx.config, me.id, res.rows[0].token_version);
     const { password: _omit, ...logged } = body;
-    await audit(db, req, 'user.update', 'user', id, { ...logged, passwordChanged: body.password !== undefined });
+    await audit(db, req, 'user.update', 'user', id, { ...logged, passwordChanged: body.password !== undefined, sessionsRevoked: revoke });
     return { ok: true };
   });
 
@@ -100,7 +108,7 @@ export async function userRoutes(app: FastifyInstance, ctx: RouteContext): Promi
     const { id } = parse(idParam, req.params);
     if (id === currentUser(req).id) throw new HttpError(400, '不能删除自己的账户');
     // 有采集目标或历史统计的用户受外键保护，只能停用，避免静默丢失历史归属
-    const res = await db.query('DELETE FROM users WHERE id = $1', [id]).catch(mapDbError);
+    const res = await db.query('DELETE FROM users WHERE id = $1', [id]).catch(mapDeleteError);
     if (res.rowCount === 0) throw notFound('用户');
     await audit(db, req, 'user.delete', 'user', id);
     return { ok: true };

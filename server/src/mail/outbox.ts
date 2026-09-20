@@ -32,10 +32,14 @@ export async function processOutbox(db: Db, sender: MailSender, opts: { maxAttem
       result.sent++;
     } catch (err) {
       const exhausted = claimed.attempts >= opts.maxAttempts;
-      await db.query(
-        `UPDATE email_outbox SET status = $2, locked_until = NULL, last_error = $3, next_attempt_at = now() + make_interval(secs => $4) WHERE id = $1`,
-        [claimed.id, exhausted ? 'failed' : 'pending', sanitizeError(err), backoffSeconds(claimed.attempts)],
+      // 只在这封信仍归本次领取所有时才退回重试（attempts 每次领取都会递增，相当于领取凭证）：
+      // 如果发送拖过了租约、别的 Worker 已经接手甚至发成功了，这里再把它改回 pending 就会重复投递
+      const released = await db.query(
+        `UPDATE email_outbox SET status = $2, locked_until = NULL, last_error = $3, next_attempt_at = now() + make_interval(secs => $4)
+          WHERE id = $1 AND status = 'sending' AND attempts = $5`,
+        [claimed.id, exhausted ? 'failed' : 'pending', sanitizeError(err), backoffSeconds(claimed.attempts), claimed.attempts],
       );
+      if (released.rowCount === 0) continue;
       exhausted ? result.failed++ : result.retried++;
       opts.log.warn({ outboxId: claimed.id, attempts: claimed.attempts, exhausted }, `邮件发送失败: ${sanitizeError(err)}`);
     }

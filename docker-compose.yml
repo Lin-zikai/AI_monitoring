@@ -7,8 +7,10 @@ x-app: &app
   restart: unless-stopped
   env_file: .env
   environment: &app-env
-    DATABASE_URL: postgres://usage:${POSTGRES_PASSWORD}@postgres:5432/usage
+    # 密码直接拼进 URL：必须是 URL 安全字符（openssl rand -hex 24），未设置时拒绝启动
+    DATABASE_URL: postgres://usage:${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD（openssl rand -hex 24）}@postgres:5432/usage
     REDIS_URL: redis://redis:6379
+    TRUST_PROXY: ${TRUST_PROXY:-1}             # API 只经由 Caddy 这一层反向代理访问（3000 端口不对外发布），采信它给出的 X-Forwarded-For
     MASTER_KEY_FILE: /run/secrets/master_key   # 主加密密钥与数据库分离管理，不进 .env、不进数据库备份
   secrets: [master_key]
   depends_on:
@@ -38,7 +40,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: usage
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD（openssl rand -hex 24）}
       POSTGRES_DB: usage
     volumes: [pgdata:/var/lib/postgresql/data]
     healthcheck:

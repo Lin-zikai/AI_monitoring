@@ -202,9 +202,9 @@ describe('总览仪表盘', () => {
     await db.query(insert, [claude, wang, server, 'claude-code', day, 'claude-opus-5', 3000, 1.5]);
     await db.query(insert, [codex, wang, server, 'codex', day, 'gpt-5', 500, 0.25]);
 
-    const row = (await get('/api/stats/overview', adminCookie)).json().todayRanking.find((r: { name: string }) => r.name === 'wang');
+    const row = (await get('/api/stats/daily-ranking', adminCookie)).json().rows.find((r: { name: string }) => r.name === 'wang');
     expect(row).toMatchObject({ claudeTokens: 3000, claudeCost: 1.5, codexTokens: 500, codexCost: 0.25, totalTokens: 3500, totalCost: 1.75 });
-    expect((await get('/api/stats/overview', zhangsanCookie)).json().todayRanking).toEqual([]);
+    expect((await get('/api/stats/overview', adminCookie)).json()).not.toHaveProperty('todayRanking'); // 总览不再重复携带当日排名
 
     // 可以查看任意一天的排名；普通用户无权访问，未来日期被拒绝
     const past = (await get('/api/stats/daily-ranking?date=2026-09-19', adminCookie)).json();
@@ -217,12 +217,12 @@ describe('总览仪表盘', () => {
 });
 
 describe('管理操作', () => {
-  it('用户列表带今日/本月用量；没有用量的用户显示为未知（null）而不是 0', async () => {
+  it('用户列表带今日/本月用量；没有任何用量行的用户是 0，有行但数值未知才是 null', async () => {
     const res = await get('/api/users', adminCookie);
     expect(res.statusCode).toBe(200);
     const users = res.json().users as Array<{ name: string; monthTokens: number | null; targetCount: number }>;
     expect(users.find((u) => u.name === 'zhangsan')).toMatchObject({ targetCount: 1 }); // 用量取决于运行当天的日期，这里不断言
-    expect(users.find((u) => u.name === '管理员')!.monthTokens).toBeNull();
+    expect(users.find((u) => u.name === '管理员')).toMatchObject({ todayTokens: 0, todayCost: 0, monthTokens: 0, monthCost: 0 });
   });
 
   it('校验服务器地址与数据目录，拒绝可注入的输入', async () => {

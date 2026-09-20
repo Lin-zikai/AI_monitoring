@@ -152,7 +152,7 @@ describe('采集范围', () => {
 
   it('断连恢复后一次覆盖整个缺口；对账批次用更长范围', () => {
     expect(computeRange({ ...base, initialized_at: now, last_success_at: at('2026-09-05 10:00') }, DEFAULT_GENERAL, now)!.since).toBe('2026-09-04');
-    expect(computeRange({ ...base, reconcile: true, initialized_at: now, last_success_at: at('2026-09-19 12:00') }, DEFAULT_GENERAL, now)!.since).toBe('2026-08-15');
+    expect(computeRange({ ...base, reconcile: true, initialized_at: now, last_success_at: at('2026-09-19 12:00') }, DEFAULT_GENERAL, now)!.since).toBe('2026-08-22');
   });
 
   it('来源切换边界裁剪范围；边界之外不再采集', () => {

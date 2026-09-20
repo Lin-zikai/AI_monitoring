@@ -1,4 +1,4 @@
-import { formatUsd } from '../util/money.js';
+import { formatUsd, fromMicros, toMicros } from '../util/money.js';
 import { SOURCE_INFO } from '../collect/adapter.js';
 import { formatInTz } from '../util/time.js';
 
@@ -13,6 +13,8 @@ export interface UsageAlertMail {
   metric: 'tokens' | 'cost' | 'budget_pct';
   periodType: 'daily' | 'monthly';
   periodKey: string;
+  /** 周期已经结束（跨日 / 跨月或补采时评估的过去周期）：文案写明具体日期或月份，而不是“当日”“本月” */
+  periodEnded?: boolean;
   tier: string;
   observed: string;
   threshold: string;
@@ -25,23 +27,46 @@ export interface UsageAlertMail {
 }
 
 const formatTokens = (v: string) => `${Number(v).toLocaleString('en-US')} Token`;
-const periodLabel = (t: 'daily' | 'monthly') => (t === 'daily' ? '当日' : '本月');
-const over = (observed: string, threshold: string) => Math.max(0, Number(observed) - Number(threshold));
+/** 进行中的周期说“当日 / 本月”；已结束的周期写明是哪一天、哪个月（补采时可能是好几天前） */
+function periodLabel(m: Pick<UsageAlertMail, 'periodType' | 'periodKey' | 'periodEnded'>): string {
+  if (!m.periodEnded) return m.periodType === 'daily' ? '当日' : '本月';
+  if (m.periodType === 'daily') return m.periodKey;
+  const [year, month] = m.periodKey.split('-');
+  return `${year} 年 ${Number(month)} 月`;
+}
+// 金额与比例一律用定点整数运算：浮点下 1.15 / 1 * 100 会得到 114.99…，向下取整就成了 114%
+const overMicros = (observed: string, threshold: string) => { const d = toMicros(observed) - toMicros(threshold); return d > 0n ? d : 0n; };
+
+/** 预算使用率（向下取整的百分数）。 */
+export function budgetPercent(observed: string, budget: string | null): number {
+  if (budget === null) return 0;
+  const b = toMicros(budget);
+  return b > 0n ? Number((toMicros(observed) * 100n) / b) : 0;
+}
+
+/**
+ * 邮件里出现的外部字符串（远端脚本的回报、远端用户可编辑的文件内容、远端命令的错误输出）：
+ * 去掉控制字符与换行并截断，避免借此伪造邮件标题或正文里的其他行。
+ */
+export function oneLine(value: string, max: number): string {
+  return value.replace(/[\p{Cc}\p{Cf}\u2028\u2029]+/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+}
 
 export function renderUsageAlert(m: UsageAlertMail): { subject: string; text: string } {
-  const lines = [`用户：${m.userName}`, `统计周期：${m.periodKey}`, `触发规则：${m.ruleName}`];
+  const lines = [`用户：${m.userName}`, `统计周期：${m.periodKey}${m.periodEnded ? '（已结束）' : ''}`, `触发规则：${m.ruleName}`];
   let subject: string;
   const scope = m.source ? ` ${SOURCE_INFO[m.source]?.label ?? m.source} ` : '';
+  const period = periodLabel(m);
+  const gap = m.periodEnded && m.periodType === 'daily' ? ' ' : ''; // 日期后面接中文要空一格
   if (m.metric === 'budget_pct') {
-    const pct = m.budget && Number(m.budget) > 0 ? Math.floor((Number(m.observed) / Number(m.budget)) * 100) : 0;
-    subject = `[用量提醒] ${m.userName}本月预算已达到 ${Number(m.tier)}%`;
-    lines.push(`本月估算费用：${formatUsd(m.observed)}`, `月度预算：${formatUsd(m.budget)}`, `预算使用率：${pct}%`);
+    subject = `[用量提醒] ${m.userName}${m.periodEnded ? ` ${period}` : period}预算已达到 ${Number(m.tier)}%`;
+    lines.push(`${period}估算费用：${formatUsd(m.observed)}`, `月度预算：${formatUsd(m.budget)}`, `预算使用率：${budgetPercent(m.observed, m.budget)}%`);
   } else if (m.metric === 'cost') {
-    subject = `[用量提醒] ${m.userName} ${periodLabel(m.periodType)}${scope}估算费用 ${formatUsd(m.observed)}，已超过 ${formatUsd(m.threshold)}`;
-    lines.push(`数据范围：${scope.trim() || '全部数据源合计'}`, `${periodLabel(m.periodType)}估算费用：${formatUsd(m.observed)}`, `阈值：${formatUsd(m.threshold)}`, `超出：${formatUsd(over(m.observed, m.threshold).toFixed(2))}`);
+    subject = `[用量提醒] ${m.userName} ${period}${scope || gap}估算费用 ${formatUsd(m.observed)}，已超过 ${formatUsd(m.threshold)}`;
+    lines.push(`数据范围：${scope.trim() || '全部数据源合计'}`, `${period}${gap}估算费用：${formatUsd(m.observed)}`, `阈值：${formatUsd(m.threshold)}`, `超出：${formatUsd(fromMicros(overMicros(m.observed, m.threshold)))}`);
   } else {
-    subject = `[用量提醒] ${m.userName} ${periodLabel(m.periodType)}${scope} Token 用量 ${formatTokens(m.observed)}，已超过 ${formatTokens(m.threshold)}`;
-    lines.push(`数据范围：${scope.trim() || '全部数据源合计'}`, `${periodLabel(m.periodType)}累计：${formatTokens(m.observed)}`, `阈值：${formatTokens(m.threshold)}`, `超出：${formatTokens(String(Math.round(over(m.observed, m.threshold))))}`);
+    subject = `[用量提醒] ${m.userName} ${period}${scope} Token 用量 ${formatTokens(m.observed)}，已超过 ${formatTokens(m.threshold)}`;
+    lines.push(`数据范围：${scope.trim() || '全部数据源合计'}`, `${period}${gap}累计：${formatTokens(m.observed)}`, `阈值：${formatTokens(m.threshold)}`, `超出：${formatTokens(String(overMicros(m.observed, m.threshold) / 1_000_000n))}`);
   }
   lines.push(`数据更新时间：${formatInTz(m.dataAsOf, m.timezone)}（${m.timezone}）`, `自动采集周期：每 ${m.intervalHours} 小时`);
   if (m.incomplete.length > 0) {
@@ -75,7 +100,7 @@ export function renderFailureAlert(m: FailureAlertMail): { subject: string; text
       `服务器：${m.serverName}（${m.host}）`,
       `采集目标：${m.dataDir}（用户 ${m.userName}）`,
       `连续失败轮数：${m.consecutiveFailures}`,
-      `错误：${m.errorCode} ${m.errorMessage}`,
+      `错误：${oneLine(m.errorCode, 64)} ${oneLine(m.errorMessage, 500)}`,
       `最近成功采集：${m.lastSuccessAt ? `${formatInTz(m.lastSuccessAt, m.timezone)}（${m.timezone}）` : '从未成功'}`,
       '',
       '已入库的历史统计会保留并标记为数据过期；恢复连接后将自动补采。',
@@ -91,7 +116,17 @@ export interface LimitAlertMail {
   fetchedAt: Date; serverName: string | null; timezone: string; baseUrl: string;
 }
 
-export function renderLimitAlert(m: LimitAlertMail): { subject: string; text: string } {
+/** 账号标识、套餐名、窗口名都来自被采集服务器（调用方应已按白名单整理过）；这里再兜底一次，保证它们各自只占一行、长度有限 */
+export function renderLimitAlert(input: LimitAlertMail): { subject: string; text: string } {
+  const m: LimitAlertMail = {
+    ...input,
+    accountLabel: input.accountLabel ? oneLine(input.accountLabel, 120) || null : null,
+    plan: input.plan ? oneLine(input.plan, 40) || null : null,
+    windowLabel: oneLine(input.windowLabel, 32),
+    servers: input.servers?.map((name) => oneLine(name, 80)),
+    others: input.others.map((o) => ({ ...o, label: oneLine(o.label, 32) })),
+    serverName: input.serverName ? oneLine(input.serverName, 80) : null,
+  };
   const remaining = Math.round((100 - m.usedPercent) * 10) / 10;
   const when = (d: Date | null) => (d ? `${formatInTz(d, m.timezone)}（${m.timezone}）` : '未知');
   const lines = [

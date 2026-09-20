@@ -70,6 +70,14 @@ export function prevMonth(month: string): string {
   return monthKey(addDays(`${month}-01`, -1));
 }
 
+/** ISO 8601 周编号，如 '2026-W38'：周一为一周之始，跨年的那一周按周四所在年份归属。 */
+export function isoWeekKey(date: string): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
+  const week = Math.ceil(((d.getTime() - Date.UTC(d.getUTCFullYear(), 0, 1)) / 86_400_000 + 1) / 7);
+  return `${d.getUTCFullYear()}-W${pad(week)}`;
+}
+
 /** 时区本地的整点时刻 → UTC 时间点（二次校正以覆盖夏令时切换）。 */
 export function zonedHourToUtc(date: string, hour: number, tz: string): Date {
   const naive = Date.parse(`${date}T${pad(hour)}:00:00Z`);

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Queryable } from './db/pool.js';
+import { isValidHost } from './security/validate.js';
 import { isValidTimeZone } from './util/time.js';
 
 export const INTERVAL_CHOICES = [1, 2, 3, 4, 6, 8, 12, 24] as const;
@@ -26,7 +27,7 @@ export const DEFAULT_GENERAL: GeneralSettings = {
   timezone: 'Asia/Shanghai',
   collectIntervalHours: 2,
   lookbackDays: 3,
-  reconcileDays: 35,
+  reconcileDays: 28, // Claude Code 默认只保留约 30 天的本地日志：超过这个范围去对账，只会把已被清理的旧日期误判为“用量减少”
   backfillDays: 90,
   backfillAlerts: false,
   failureAlertThreshold: 2,
@@ -46,7 +47,7 @@ export type LimitAlertSettings = z.infer<typeof limitAlertSchema>;
 export const DEFAULT_LIMIT_ALERT: LimitAlertSettings = { enabled: false, remainingBelowPercent: 20, includeFiveHour: false, notifyAdmins: true, emails: [] };
 
 export const smtpSettingsSchema = z.object({
-  host: z.string().min(1).max(253),
+  host: z.string().trim().refine(isValidHost, 'SMTP 服务器地址不合法（应为主机名或 IP）'),
   port: z.number().int().min(1).max(65535),
   /** true = 隐式 TLS（465）；false = STARTTLS（强制升级） */
   secure: z.boolean(),

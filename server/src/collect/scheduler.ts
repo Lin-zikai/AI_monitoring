@@ -53,15 +53,6 @@ export async function createAdhocBatch(db: Db, kind: 'manual' | 'init', targetId
   });
 }
 
-/** 已创建但未成功入队（如进程在两步之间崩溃）的运行，由调度 tick 重新入队；jobId = runId 保证不重复。 */
-export async function findOrphanedRuns(db: Db, olderThanMs = 10 * 60_000): Promise<string[]> {
-  const res = await db.query(
-    "SELECT id FROM collection_runs WHERE status = 'queued' AND attempt = 0 AND created_at < now() - make_interval(secs => $1) AND created_at > now() - interval '1 day'",
-    [olderThanMs / 1000],
-  );
-  return res.rows.map((r) => r.id);
-}
-
 export async function applyRetention(db: Db): Promise<{ usageDeleted: number }> {
   const settings = await getGeneralSettings(db);
   await db.query("DELETE FROM collection_runs WHERE created_at < now() - interval '180 days'");

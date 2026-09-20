@@ -1,13 +1,18 @@
 import type { Tx } from '../db/pool.js';
 import type { GeneralSettings } from '../settings.js';
 import { fromMicros, toMicros } from '../util/money.js';
-import { addDays, monthKey, monthRange, prevMonth, zonedHourToUtc } from '../util/time.js';
+import { addDays, maxDate, monthKey, monthRange, prevMonth, zonedHourToUtc } from '../util/time.js';
 import { renderUsageAlert, type IncompleteSource } from './templates.js';
 
 export interface EvaluateInput {
   userIds: string[];
   /** 本次入库覆盖的最早日期：决定是否需要回看刚结束的日/月周期 */
   touchedSince: string;
+  /**
+   * 本次入库后用量确实变多（或新出现）的日期。停机、断连几天后的补采会一次改动多个已结束的日 / 月，
+   * 这些周期同样要评估；没有变化的过去周期当时已经评估过，不再重复。
+   */
+  changedDates?: string[];
   today: string;
   now: Date;
   /** 首次历史回填：默认只评估当前周期，不为历史周期补发提醒 */
@@ -17,14 +22,21 @@ export interface EvaluateInput {
   baseUrl: string;
 }
 
-interface Period { type: 'daily' | 'monthly'; key: string; first: string; last: string; ended: boolean }
+interface Period {
+  type: 'daily' | 'monthly'; key: string; first: string; last: string; ended: boolean;
+  /** 早于“刚结束的那个周期”的补评估：对规则的要求更严（周期结束后改过的规则也不补发） */
+  catchUp?: boolean;
+}
+
+/** 补评估最多回看的天数（覆盖一次较长的停机 + 上个月的月度周期）：再早的周期即使数据有变也不再发信 */
+export const ENDED_PERIOD_LOOKBACK_DAYS = 35;
 
 interface RuleRow {
   id: string; name: string; metric: 'tokens' | 'cost' | 'budget_pct'; period: 'daily' | 'monthly'; source: string | null; scope_type: 'global' | 'team' | 'user';
-  tiers: string[]; notify_admins: boolean; extra_emails: string[]; created_at: Date;
+  tiers: string[]; notify_admins: boolean; extra_emails: string[]; created_at: Date; updated_at: Date;
 }
 
-export function periodsToEvaluate(today: string, touchedSince: string, includeEnded: boolean): Period[] {
+export function periodsToEvaluate(today: string, touchedSince: string, includeEnded: boolean, changedDates: string[] = []): Period[] {
   const month = monthKey(today);
   const periods: Period[] = [
     { type: 'daily', key: today, first: today, last: today, ended: false },
@@ -36,6 +48,14 @@ export function periodsToEvaluate(today: string, touchedSince: string, includeEn
   if (touchedSince <= yesterday) periods.push({ type: 'daily', key: yesterday, first: yesterday, last: yesterday, ended: true });
   const lastMonth = monthRange(prevMonth(month));
   if (touchedSince <= lastMonth.last) periods.push({ type: 'monthly', key: prevMonth(month), ...lastMonth, ended: true });
+
+  // 缺口超过一天的补采：更早的已结束周期里，本次数据有增长的那些也要评估（dedupe_key 保证已提醒过的不会重发）
+  const floor = maxDate(touchedSince, addDays(today, -ENDED_PERIOD_LOOKBACK_DAYS));
+  const older = [...new Set(changedDates)].filter((d) => d >= floor && d < yesterday).sort();
+  for (const d of older) periods.push({ type: 'daily', key: d, first: d, last: d, ended: true, catchUp: true });
+  for (const m of new Set(older.map(monthKey))) {
+    if (m < prevMonth(month)) periods.push({ type: 'monthly', key: m, ...monthRange(m), ended: true, catchUp: true });
+  }
   return periods;
 }
 
@@ -48,7 +68,8 @@ export const messageIdFor = (eventId: string, baseUrl: string) => {
 /** 在入库事务内评估告警：告警记录与邮件任务同事务创建，dedupe_key 保证每周期每档位只创建一次。 */
 export async function evaluateUsageAlerts(tx: Tx, input: EvaluateInput): Promise<number> {
   const { settings, now } = input;
-  const periods = periodsToEvaluate(input.today, input.touchedSince, !input.isBackfill || settings.backfillAlerts);
+  // 首次历史回填默认只评估当前周期（includeEnded = false），不会因为 changedDates 里全是历史日期而集中补发
+  const periods = periodsToEvaluate(input.today, input.touchedSince, !input.isBackfill || settings.backfillAlerts, input.changedDates);
   let created = 0;
 
   for (const userId of input.userIds) {
@@ -58,7 +79,7 @@ export async function evaluateUsageAlerts(tx: Tx, input: EvaluateInput): Promise
     if (!user) continue;
 
     const rules = (await tx.query<RuleRow>(
-      `SELECT id, name, metric, period, source, scope_type, tiers::text[] AS tiers, notify_admins, extra_emails, created_at
+      `SELECT id, name, metric, period, source, scope_type, tiers::text[] AS tiers, notify_admins, extra_emails, created_at, updated_at
          FROM alert_rules
         WHERE enabled AND (scope_type = 'global' OR (scope_type = 'team' AND scope_team = $2) OR (scope_type = 'user' AND scope_user_id = $1))`,
       [userId, user.team],
@@ -77,7 +98,10 @@ export async function evaluateUsageAlerts(tx: Tx, input: EvaluateInput): Promise
     for (const rule of applicable) {
       for (const period of periods.filter((p) => p.type === rule.period)) {
         // 已结束周期只对周期结束前就存在的规则评估，避免新建规则立刻为过去的周期发信
-        if (period.ended && rule.created_at >= zonedHourToUtc(addDays(period.last, 1), 0, settings.timezone)) continue;
+        // 补评估更早的周期时再严一层：周期结束后才调整过的规则（如调低了阈值）也不回头补发
+        const periodEnd = period.ended ? zonedHourToUtc(addDays(period.last, 1), 0, settings.timezone) : null;
+        const ruleSince = period.catchUp && rule.updated_at > rule.created_at ? rule.updated_at : rule.created_at;
+        if (periodEnd && ruleSince >= periodEnd) continue;
 
         const sumKey = `${period.key}|${rule.source ?? '*'}`;
         let sum = sums.get(sumKey);
@@ -133,7 +157,7 @@ export async function evaluateUsageAlerts(tx: Tx, input: EvaluateInput): Promise
           continue;
         }
         const mail = renderUsageAlert({
-          userId, userName: user.name, ruleName: rule.name, source: rule.source, metric: rule.metric, periodType: period.type, periodKey: period.key,
+          userId, userName: user.name, ruleName: rule.name, source: rule.source, metric: rule.metric, periodType: period.type, periodKey: period.key, periodEnded: period.ended,
           tier: top.tier, observed: rule.metric === 'tokens' ? sum.tokens : sum.cost,
           threshold: rule.metric === 'tokens' ? String(top.threshold / 1_000_000n) : fromMicros(top.threshold),
           budget, dataAsOf: sum.asOf ?? now, timezone: settings.timezone, intervalHours: settings.collectIntervalHours,

@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { CollectError, collectEnvelope, parseEnvelope, SOURCE_INFO, supportedSources } from '../../collect/adapter.js';
 import { buildCollectCommand } from '../../collect/command.js';
-import { guessRemoteHome, installCollector } from '../../collect/install.js';
+import { guessRemoteHome, installCollector, type InstallMode } from '../../collect/install.js';
 import { createAdhocBatch } from '../../collect/scheduler.js';
 import { withTx } from '../../db/pool.js';
 import { sanitizeError } from '../../logger.js';
@@ -13,10 +13,9 @@ import { getGeneralSettings } from '../../settings.js';
 import { describePrivateKey, type SshTarget } from '../../ssh/client.js';
 import { dateInTz } from '../../util/time.js';
 import type { RouteContext } from '../app.js';
-import { audit, currentUser, HttpError, mapDbError, notFound, parse, parsePatch } from '../http.js';
+import { audit, currentUser, dateStr, HttpError, mapDbError, mapDeleteError, notFound, offsetParam, parse, parsePatch } from '../http.js';
 import { idParam } from './users.js';
 
-const dateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const sshUsername = z.string().refine(isValidSshUsername, 'SSH 用户名不合法');
 
 const credentialSchema = z.object({
@@ -46,7 +45,7 @@ const serverSchema = z.object({
   port: z.number().int().min(1).max(65535).default(22),
   sshUsername,
   credentialId: z.string().uuid(),
-  collectCommand: z.string().refine(isValidCollectCommand, '采集命令只能是命令名或安全的绝对路径').default('ccusage-collect'),
+  collectCommand: z.string().refine(isValidCollectCommand, '采集命令只能是 ccusage-collect，或以 /ccusage-collect 结尾的安全绝对路径').default('ccusage-collect'),
   enabled: z.boolean().default(true),
 });
 
@@ -64,6 +63,11 @@ const targetSchema = z.object({
   enabled: z.boolean().default(true),
 });
 const targetPatchSchema = targetSchema.omit({ userId: true, source: true }).partial();
+const RUN_STATUSES = ['queued', 'running', 'success', 'failed', 'skipped_locked', 'stale'] as const; // 与 collection_runs.status 的 CHECK 一致
+
+function assertSourceRange(start: string | null | undefined, end: string | null | undefined): void {
+  if (start && end && start > end) throw new HttpError(400, '来源开始日期不能晚于结束日期', 'BAD_DATE_RANGE');
+}
 
 const rebindSchema = z.object({
   userId: z.string().uuid(),
@@ -141,7 +145,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
 
   app.delete('/credentials/:id', admin, async (req) => {
     const { id } = parse(idParam, req.params);
-    const res = await db.query('DELETE FROM credentials WHERE id = $1', [id]).catch(mapDbError);
+    const res = await db.query('DELETE FROM credentials WHERE id = $1', [id]).catch(mapDeleteError);
     if (res.rowCount === 0) throw notFound('凭据');
     await audit(db, req, 'credential.delete', 'credential', id);
     return { ok: true };
@@ -153,7 +157,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
     const servers = await db.query(
       `SELECT s.id, s.name, s.host, s.port, s.ssh_username AS "sshUsername", s.credential_id AS "credentialId", c.name AS "credentialName",
               (c.revoked_at IS NOT NULL) AS "credentialRevoked", s.host_key_fingerprint AS "hostKeyFingerprint",
-              s.collect_command AS "collectCommand", s.default_user_id AS "defaultUserId", s.enabled, s.last_connect_ok_at AS "lastConnectOkAt", s.last_error AS "lastError"
+              s.collect_command AS "collectCommand", s.install_mode AS "installMode", s.default_user_id AS "defaultUserId", s.enabled, s.last_connect_ok_at AS "lastConnectOkAt", s.last_error AS "lastError"
          FROM servers s LEFT JOIN credentials c ON c.id = s.credential_id ORDER BY s.name`,
     );
     const targets = await db.query(
@@ -191,6 +195,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
     await db.query(
       `UPDATE servers SET name = COALESCE($2, name), host = COALESCE($3, host), port = COALESCE($4, port), ssh_username = COALESCE($5, ssh_username),
               credential_id = COALESCE($6, credential_id), collect_command = COALESCE($7, collect_command), enabled = COALESCE($8, enabled),
+              host_key_reset = host_key_reset OR ($9 AND host_key_fingerprint IS NOT NULL),
               host_key_fingerprint = CASE WHEN $9 THEN NULL ELSE host_key_fingerprint END, updated_at = now()
         WHERE id = $1`,
       [id, body.name ?? null, body.host ?? null, body.port ?? null, body.sshUsername ?? null, body.credentialId ?? null, body.collectCommand ?? null, body.enabled ?? null, endpointChanged],
@@ -204,7 +209,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
     const { purge } = parse(z.object({ purge: z.enum(['true', 'false']).default('false') }), req.query);
     const usage = (await db.query('SELECT count(*)::int AS n FROM usage_daily WHERE server_id = $1', [id])).rows[0].n;
     if (usage > 0 && purge !== 'true') throw new HttpError(409, `该服务器已有 ${usage} 行历史统计；删除会一并清除。请改为停用，或带 purge=true 确认删除`, 'HAS_USAGE');
-    const res = await db.query('DELETE FROM servers WHERE id = $1', [id]);
+    const res = await db.query('DELETE FROM servers WHERE id = $1', [id]).catch(mapDeleteError);
     if (res.rowCount === 0) throw notFound('服务器');
     await audit(db, req, 'server.delete', 'server', id, { purgedUsageRows: usage });
     return { ok: true };
@@ -214,6 +219,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
     const { id } = parse(idParam, req.params);
     const server = (await db.query('SELECT host, port, host_key_fingerprint FROM servers WHERE id = $1', [id])).rows[0];
     if (!server) throw notFound('服务器');
+    if (!isValidHost(server.host)) throw new HttpError(400, '服务器地址不合法'); // 写入时已校验；这里兜底，防止库里的历史脏数据被拿去发起连接
     try {
       const fingerprint = await ctx.scanHostKey(server.host, server.port);
       return { fingerprint, confirmed: server.host_key_fingerprint, matches: server.host_key_fingerprint === fingerprint };
@@ -225,7 +231,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
   app.post('/servers/:id/confirm-host-key', admin, async (req) => {
     const { id } = parse(idParam, req.params);
     const body = parse(z.object({ fingerprint: z.string().regex(/^SHA256:[A-Za-z0-9+/]{43}$/, '指纹格式应为 SHA256:...') }), req.body);
-    const res = await db.query('UPDATE servers SET host_key_fingerprint = $2, updated_at = now() WHERE id = $1', [id, body.fingerprint]);
+    const res = await db.query('UPDATE servers SET host_key_fingerprint = $2, host_key_reset = false, updated_at = now() WHERE id = $1', [id, body.fingerprint]);
     if (res.rowCount === 0) throw notFound('服务器');
     await audit(db, req, 'server.confirm_host_key', 'server', id, { fingerprint: body.fingerprint });
     return { ok: true };
@@ -274,18 +280,33 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
   /** 自动安装采集组件：在远端账户家目录下安装 Node（如缺）、固定版本 ccusage 与采集脚本，并登记采集命令。 */
   app.post('/servers/:id/install-collector', admin, async (req) => {
     const { id } = parse(idParam, req.params);
-    const body = parse(z.object({ mode: z.enum(['auto', 'latest', 'pinned']).default('latest') }), req.body ?? {});
+    const body = parse(z.object({ mode: z.enum(['auto', 'latest', 'pinned']).optional() }), req.body ?? {});
     const { ssh } = await loadSshTarget(id);
+    // 不指定模式时沿用这台服务器上次选定的模式，重装不会悄悄改掉“固定版本”
+    const mode: InstallMode = body.mode ?? (await db.query('SELECT install_mode FROM servers WHERE id = $1', [id])).rows[0].install_mode;
     try {
-      const result = await installCollector(ctx.executor, ssh, { mode: body.mode });
-      await db.query('UPDATE servers SET collect_command = $2, last_connect_ok_at = now(), last_error = NULL, updated_at = now() WHERE id = $1', [id, result.collectCommand]);
-      await audit(db, req, 'server.install_collector', 'server', id, { collectCommand: result.collectCommand, nodeVersion: result.nodeVersion, ccusageVersion: result.ccusageVersion, ccusageMode: result.ccusageMode, ccusagePath: result.ccusagePath });
+      const result = await installCollector(ctx.executor, ssh, { mode });
+      await db.query('UPDATE servers SET collect_command = $2, install_mode = $3, last_connect_ok_at = now(), last_error = NULL, updated_at = now() WHERE id = $1', [id, result.collectCommand, mode]);
+      await audit(db, req, 'server.install_collector', 'server', id, { collectCommand: result.collectCommand, installMode: mode, nodeVersion: result.nodeVersion, ccusageVersion: result.ccusageVersion, ccusageMode: result.ccusageMode, ccusagePath: result.ccusagePath });
       return { ok: true, ...result };
     } catch (err) {
       await audit(db, req, 'server.install_collector_failed', 'server', id, { message: sanitizeError(err) });
       return { ok: false, code: err instanceof CollectError ? err.code : 'ERROR', message: err instanceof Error ? err.message.slice(0, 1500) : String(err) };
     }
   });
+
+  /** 入队失败（Redis 不可用）时把刚创建的运行记为失败，不让它们永远停在“排队中”；错误照常抛给调用方（503）。 */
+  async function enqueueBatch(batch: { runIds: string[] }, opts?: { acceptDecrease?: boolean }): Promise<void> {
+    try {
+      await ctx.queues.enqueueRuns(batch.runIds, opts);
+    } catch (err) {
+      await db.query(
+        "UPDATE collection_runs SET status = 'failed', finished_at = now(), error_code = 'QUEUE_UNAVAILABLE', error_message = '任务未能进入队列（任务队列不可用）' WHERE id = ANY($1::uuid[]) AND status = 'queued'",
+        [batch.runIds],
+      ).catch(() => undefined);
+      throw err;
+    }
+  }
 
   /**
    * 一步接入：自动信任首次见到的主机指纹 → 检查采集组件（没有则自动安装）→ 为默认用户创建各数据源的采集目标 → 启动首次采集。
@@ -294,14 +315,18 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
   async function onboardServer(req: Parameters<typeof audit>[1], serverId: string): Promise<{ ok: boolean; steps: OnboardStep[] }> {
     const steps: OnboardStep[] = [];
     const done = (step: OnboardStep['step'], ok: boolean, message: string) => { steps.push({ step, ok, message }); return ok; };
-    const server = (await db.query('SELECT name, host, port, ssh_username, host_key_fingerprint, collect_command, default_user_id FROM servers WHERE id = $1', [serverId])).rows[0];
+    const server = (await db.query('SELECT name, host, port, ssh_username, host_key_fingerprint, host_key_reset, collect_command, install_mode, default_user_id FROM servers WHERE id = $1', [serverId])).rows[0];
     if (!server) throw notFound('服务器');
     if (!server.default_user_id) throw new HttpError(400, '请先为这台服务器选择归属用户');
 
-    // 1. 主机指纹：首次连接自动信任（等同于 ssh 首次连接时回答 yes）；之后指纹变化仍会被拒绝
+    // 1. 主机指纹：首次连接自动信任（等同于 ssh 首次连接时回答 yes）；之后指纹变化仍会被拒绝。
+    //    改过地址/端口的服务器不算“首次”：旧指纹已作废，新指纹必须人工核对
     try {
       const fingerprint = await ctx.scanHostKey(server.host, server.port);
-      if (!server.host_key_fingerprint) {
+      if (!server.host_key_fingerprint && server.host_key_reset) {
+        done('hostkey', false, `这台服务器改过地址或端口，原指纹已作废（现为 ${fingerprint}）。请在“更多 → 主机指纹”里核对并确认后再重新接入`);
+        return { ok: false, steps };
+      } else if (!server.host_key_fingerprint) {
         await db.query('UPDATE servers SET host_key_fingerprint = $2, updated_at = now() WHERE id = $1', [serverId, fingerprint]);
         await audit(db, req, 'server.trust_host_key', 'server', serverId, { fingerprint, mode: 'trust-on-first-use' });
         done('hostkey', true, `已记录主机指纹 ${fingerprint}`);
@@ -330,12 +355,12 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
       } catch { /* 不是采集脚本的应答 */ }
       if (installed) done('collector', true, '采集组件已就绪');
       else {
-        const result = await installCollector(ctx.executor, ssh);
+        const result = await installCollector(ctx.executor, ssh, { mode: server.install_mode });
         collectCommand = result.collectCommand;
         reportedHome = result.home;
         try { configDirs = collectEnvelope.parse(JSON.parse((await ctx.executor.exec(ssh, collectCommand, 30_000)).stdout)).configDirs ?? {}; } catch { /* 拿不到就用默认目录 */ }
         await db.query('UPDATE servers SET collect_command = $2, updated_at = now() WHERE id = $1', [serverId, collectCommand]);
-        await audit(db, req, 'server.install_collector', 'server', serverId, { collectCommand, ccusageVersion: result.ccusageVersion, ccusageMode: result.ccusageMode });
+        await audit(db, req, 'server.install_collector', 'server', serverId, { collectCommand, installMode: server.install_mode, ccusageVersion: result.ccusageVersion, ccusageMode: result.ccusageMode });
         done('collector', true, `已安装采集组件（ccusage ${result.ccusageVersion}）`);
       }
       await db.query('UPDATE servers SET last_connect_ok_at = now(), last_error = NULL WHERE id = $1', [serverId]);
@@ -349,6 +374,8 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
     // 3. 采集目标：每个数据源一个，目录取该账户家目录下的默认位置；目录不存在视为“未使用”，不算失败
     const home = reportedHome ?? guessRemoteHome(collectCommand, server.ssh_username);
     const targetIds = await withTx(db, async (tx) => {
+      // 锁住服务器行：同一台服务器被并发接入（连点两次、两位管理员同时操作）时串行执行，后到的会看到已创建的目标，而不是撞唯一约束
+      if ((await tx.query('SELECT 1 FROM servers WHERE id = $1 FOR UPDATE', [serverId])).rowCount === 0) throw notFound('服务器');
       const ids: string[] = [];
       for (const source of supportedSources()) {
         const configured = configDirs[source];
@@ -363,7 +390,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
         ids.push(created.id);
       }
       return ids;
-    });
+    }).catch(mapDbError); // 归属用户已被删除、目录已被手动建的目标占用等 → 4xx 而不是 500
     done('targets', true, `采集 ${supportedSources().map((src) => SOURCE_INFO[src]?.label ?? src).join('、')}（目录位于 ${home}）`);
 
     // 4. 首次采集
@@ -371,8 +398,13 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
       'SELECT id FROM collection_targets WHERE id = ANY($1::uuid[]) AND enabled AND NOT (lock_run_id IS NOT NULL AND lock_expires_at > now())', [targetIds],
     )).rows.map((r) => r.id as string);
     if (idle.length > 0) {
-      const batch = await createAdhocBatch(db, 'init', idle, currentUser(req).id);
-      await ctx.queues.enqueueRuns(batch.runIds);
+      try {
+        await enqueueBatch(await createAdhocBatch(db, 'init', idle, currentUser(req).id));
+      } catch (err) {
+        if (!(err instanceof HttpError)) throw err;
+        done('collect', false, `${err.message}（服务器与采集目标已创建，稍后可手动点“立即采集”）`);
+        return { ok: false, steps };
+      }
     }
     done('collect', true, '首次采集已开始，稍后刷新即可看到数据');
     return { ok: true, steps };
@@ -412,7 +444,14 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
   app.post('/servers/:id/onboard', admin, async (req) => {
     const { id } = parse(idParam, req.params);
     const body = parse(z.object({ userId: z.string().uuid().optional() }), req.body ?? {});
-    if (body.userId) await db.query('UPDATE servers SET default_user_id = $2 WHERE id = $1', [id, body.userId]).catch(mapDbError);
+    if (body.userId) {
+      const before = (await db.query('SELECT default_user_id FROM servers WHERE id = $1', [id])).rows[0];
+      if (!before) throw notFound('服务器');
+      if (before.default_user_id !== body.userId) {
+        await db.query('UPDATE servers SET default_user_id = $2, updated_at = now() WHERE id = $1', [id, body.userId]).catch(mapDbError);
+        await audit(db, req, 'server.set_default_user', 'server', id, { previousUserId: before.default_user_id, userId: body.userId });
+      }
+    }
     return { id, ...(await onboardServer(req, id)) };
   });
 
@@ -421,7 +460,9 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
   app.post('/servers/:id/targets', admin, async (req, reply) => {
     const { id: serverId } = parse(idParam, req.params);
     const body = parse(targetSchema, req.body);
+    assertSourceRange(body.sourceStartDate, body.sourceEndDate);
     const targetId = await withTx(db, async (tx) => {
+      if ((await tx.query('SELECT 1 FROM servers WHERE id = $1 FOR SHARE', [serverId])).rowCount === 0) throw notFound('服务器');
       const res = await tx.query(
         `INSERT INTO collection_targets (server_id, user_id, source, data_dir, ssh_username, credential_id, shared_account, source_start_date, source_end_date, enabled, missing_ok)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
@@ -438,20 +479,25 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
     const { id } = parse(idParam, req.params);
     const body = parsePatch(targetPatchSchema, req.body);
     const has = (k: keyof typeof body) => Object.hasOwn(body, k);
-    const res = await db.query(
-      `UPDATE collection_targets SET
-              data_dir = CASE WHEN $2 THEN $3 ELSE data_dir END, dir_hint = CASE WHEN $2 THEN NULL ELSE dir_hint END,
-              ssh_username = CASE WHEN $4 THEN $5 ELSE ssh_username END,
-              credential_id = CASE WHEN $6 THEN $7::uuid ELSE credential_id END,
-              shared_account = COALESCE($8, shared_account),
-              source_start_date = CASE WHEN $9 THEN $10::date ELSE source_start_date END,
-              source_end_date = CASE WHEN $11 THEN $12::date ELSE source_end_date END,
-              enabled = COALESCE($13, enabled), missing_ok = COALESCE($14, missing_ok), updated_at = now()
-        WHERE id = $1`,
-      [id, has('dataDir'), body.dataDir ?? null, has('sshUsername'), body.sshUsername ?? null, has('credentialId'), body.credentialId ?? null,
-        body.sharedAccount ?? null, has('sourceStartDate'), body.sourceStartDate ?? null, has('sourceEndDate'), body.sourceEndDate ?? null, body.enabled ?? null, body.missingOk ?? null],
-    ).catch(mapDbError);
-    if (res.rowCount === 0) throw notFound('采集目标');
+    await withTx(db, async (tx) => {
+      // 只改一端时，要和库里的另一端比较；锁行防止两个请求各改一端、合起来成了倒置区间（数据库 CHECK 是最后一道防线）
+      const stored = (await tx.query('SELECT source_start_date, source_end_date FROM collection_targets WHERE id = $1 FOR UPDATE', [id])).rows[0];
+      if (!stored) throw notFound('采集目标');
+      assertSourceRange(has('sourceStartDate') ? body.sourceStartDate : stored.source_start_date, has('sourceEndDate') ? body.sourceEndDate : stored.source_end_date);
+      await tx.query(
+        `UPDATE collection_targets SET
+                data_dir = CASE WHEN $2 THEN $3 ELSE data_dir END, dir_hint = CASE WHEN $2 THEN NULL ELSE dir_hint END,
+                ssh_username = CASE WHEN $4 THEN $5 ELSE ssh_username END,
+                credential_id = CASE WHEN $6 THEN $7::uuid ELSE credential_id END,
+                shared_account = COALESCE($8, shared_account),
+                source_start_date = CASE WHEN $9 THEN $10::date ELSE source_start_date END,
+                source_end_date = CASE WHEN $11 THEN $12::date ELSE source_end_date END,
+                enabled = COALESCE($13, enabled), missing_ok = COALESCE($14, missing_ok), updated_at = now()
+          WHERE id = $1`,
+        [id, has('dataDir'), body.dataDir ?? null, has('sshUsername'), body.sshUsername ?? null, has('credentialId'), body.credentialId ?? null,
+          body.sharedAccount ?? null, has('sourceStartDate'), body.sourceStartDate ?? null, has('sourceEndDate'), body.sourceEndDate ?? null, body.enabled ?? null, body.missingOk ?? null],
+      );
+    }).catch(mapDbError);
     await audit(db, req, 'target.update', 'target', id, body);
     return { ok: true };
   });
@@ -480,7 +526,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
     const { purge } = parse(z.object({ purge: z.enum(['true', 'false']).default('false') }), req.query);
     const usage = (await db.query('SELECT count(*)::int AS n FROM usage_daily WHERE target_id = $1', [id])).rows[0].n;
     if (usage > 0 && purge !== 'true') throw new HttpError(409, `该目标已有 ${usage} 行历史统计；删除会一并清除。请改为停用，或带 purge=true 确认删除`, 'HAS_USAGE');
-    const res = await db.query('DELETE FROM collection_targets WHERE id = $1', [id]);
+    const res = await db.query('DELETE FROM collection_targets WHERE id = $1', [id]).catch(mapDeleteError);
     if (res.rowCount === 0) throw notFound('采集目标');
     await audit(db, req, 'target.delete', 'target', id, { purgedUsageRows: usage });
     return { ok: true };
@@ -519,7 +565,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
     if (!target.active) throw new HttpError(409, '服务器或采集目标已停用');
     if (target.collecting) throw new HttpError(409, '该目标正在采集中，请稍后再试', 'COLLECTING');
     const batch = await createAdhocBatch(db, 'manual', [id], currentUser(req).id);
-    await ctx.queues.enqueueRuns(batch.runIds, { acceptDecrease: body.acceptDecrease });
+    await enqueueBatch(batch, { acceptDecrease: body.acceptDecrease });
     await audit(db, req, 'target.collect', 'target', id, { acceptDecrease: body.acceptDecrease, runIds: batch.runIds });
     return reply.status(202).send({ batchId: batch.batchId, runIds: batch.runIds });
   });
@@ -531,13 +577,16 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
     )).rows.map((r) => r.id as string);
     if (ids.length === 0) throw new HttpError(409, '没有可采集的目标');
     const batch = await createAdhocBatch(db, 'manual', ids, currentUser(req).id);
-    await ctx.queues.enqueueRuns(batch.runIds);
+    await enqueueBatch(batch);
     await audit(db, req, 'collection.run_all', 'batch', batch.batchId, { targets: ids.length });
     return reply.status(202).send({ batchId: batch.batchId, runs: batch.runIds.length });
   });
 
   app.get('/collection/runs', admin, async (req) => {
-    const q = parse(z.object({ targetId: z.string().uuid().optional(), status: z.string().max(32).optional(), limit: z.coerce.number().int().min(1).max(500).default(100) }), req.query);
+    const q = parse(z.object({
+      targetId: z.string().uuid().optional(), status: z.enum(RUN_STATUSES).optional(),
+      limit: z.coerce.number().int().min(1).max(500).default(100), offset: offsetParam,
+    }), req.query);
     const res = await db.query(
       `SELECT r.id, r.batch_id AS "batchId", r.target_id AS "targetId", s.name AS "serverName", t.data_dir AS "dataDir", u.name AS "userName",
               r.trigger, r.status, r.attempt, r.range_since AS "rangeSince", r.range_until AS "rangeUntil",
@@ -546,8 +595,8 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
          FROM collection_runs r
          JOIN collection_targets t ON t.id = r.target_id JOIN servers s ON s.id = t.server_id JOIN users u ON u.id = t.user_id
         WHERE ($1::uuid IS NULL OR r.target_id = $1) AND ($2::text IS NULL OR r.status = $2)
-        ORDER BY r.created_at DESC LIMIT $3`,
-      [q.targetId ?? null, q.status ?? null, q.limit],
+        ORDER BY r.created_at DESC, r.id LIMIT $3 OFFSET $4`,
+      [q.targetId ?? null, q.status ?? null, q.limit, q.offset],
     );
     return { runs: res.rows };
   });

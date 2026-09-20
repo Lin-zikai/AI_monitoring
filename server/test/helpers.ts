@@ -76,6 +76,26 @@ export function fakeExecutor(handler: FakeRemote): RemoteExecutor & { calls: Arr
   };
 }
 
+/** 假的任务队列：记录入队的运行；把 failWith 设为错误即可模拟 Redis 不可用 */
+export interface FakeQueues {
+  enqueueRuns(runIds: string[], opts?: { acceptDecrease?: boolean }): Promise<void>;
+  kickMail(): Promise<void>;
+  syncSchedule(): Promise<void>;
+  enqueued: string[][];
+  scheduleSyncs: number;
+  failWith: Error | null;
+}
+
+export function fakeQueues(): FakeQueues {
+  const q: FakeQueues = {
+    enqueued: [], scheduleSyncs: 0, failWith: null,
+    async enqueueRuns(runIds) { if (q.failWith) throw q.failWith; q.enqueued.push(runIds); },
+    async kickMail() { if (q.failWith) throw q.failWith; },
+    async syncSchedule() { if (q.failWith) throw q.failWith; q.scheduleSyncs += 1; },
+  };
+  return q;
+}
+
 export const remoteError = (code: string, message = code, retryable = false) => new CollectError(code, message, retryable);
 
 export interface Seeded { adminId: string; credentialId: string }

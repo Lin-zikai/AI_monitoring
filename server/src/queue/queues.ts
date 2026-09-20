@@ -1,5 +1,6 @@
 import { Queue, type ConnectionOptions } from 'bullmq';
-import type { Db } from '../db/pool.js';
+import type { Queryable } from '../db/pool.js';
+import { logger } from '../logger.js';
 import { getGeneralSettings } from '../settings.js';
 
 export const COLLECT_QUEUE = 'collect';
@@ -8,7 +9,17 @@ export const MAIL_QUEUE = 'mail';
 
 export interface CollectJob { runId: string; acceptDecrease?: boolean }
 
-export function redisConnection(redisUrl: string): ConnectionOptions {
+export interface RedisConnectionOptions {
+  /**
+   * 供 API 进程使用：Redis 断开后，命令重试一次就报错，而不是无限排队等待重连（否则 HTTP 请求会一直挂起）。
+   * 启动时就连不上的情况 BullMQ 会一直等连接就绪，由 API 层的超时兜底（api/app.ts 的 guardQueues）。
+   * 不关闭 enableOfflineQueue：实测关闭后，Redis 不可用时 Queue.close() 内部的 QUIT 会抛出无人接收的异常，直接打崩进程。
+   * Worker 必须保持默认（maxRetriesPerRequest: null），这是 BullMQ 对阻塞连接的要求。
+   */
+  failFast?: boolean;
+}
+
+export function redisConnection(redisUrl: string, opts: RedisConnectionOptions = {}): ConnectionOptions {
   const url = new URL(redisUrl);
   return {
     host: url.hostname,
@@ -17,7 +28,7 @@ export function redisConnection(redisUrl: string): ConnectionOptions {
     password: url.password ? decodeURIComponent(url.password) : undefined,
     db: url.pathname.length > 1 ? Number(url.pathname.slice(1)) : 0,
     tls: url.protocol === 'rediss:' ? {} : undefined,
-    maxRetriesPerRequest: null,
+    ...(opts.failFast ? { maxRetriesPerRequest: 1, connectTimeout: 5000 } : { maxRetriesPerRequest: null }),
   };
 }
 
@@ -27,15 +38,17 @@ export interface Queues {
   mail: Queue;
   enqueueRuns(runIds: string[], opts?: { acceptDecrease?: boolean }): Promise<void>;
   kickMail(): Promise<void>;
-  syncSchedule(db: Db): Promise<void>;
+  syncSchedule(db: Queryable): Promise<void>;
   close(): Promise<void>;
 }
 
-export function createQueues(redisUrl: string, collectMaxAttempts: number): Queues {
-  const connection = redisConnection(redisUrl);
+export function createQueues(redisUrl: string, collectMaxAttempts: number, opts: RedisConnectionOptions = {}): Queues {
+  const connection = redisConnection(redisUrl, opts);
   const collect = new Queue<CollectJob>(COLLECT_QUEUE, { connection });
   const schedule = new Queue(SCHEDULE_QUEUE, { connection });
   const mail = new Queue(MAIL_QUEUE, { connection });
+  // 连接错误（Redis 重启、断网）由 ioredis 自动重连；这里只负责留下日志
+  for (const q of [collect, schedule, mail]) q.on('error', (err) => logger.warn({ err: err.message, queue: q.name }, '任务队列连接出错'));
 
   return {
     collect, schedule, mail,

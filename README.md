@@ -63,7 +63,7 @@ cd server && npm test
 | 方案要求 | 实现位置 |
 | --- | --- |
 | 受限采集命令、禁止拼接远程命令（§4、§9） | `remote/ccusage-collect.mjs` 只接受白名单参数与白名单目录；`server/src/collect/command.ts` 对所有参数做字符集校验；`install.sh` 用 `command=…,restrict` 锁定密钥 |
-| 主机指纹校验（§4、§9） | `server/src/ssh/client.ts`：未确认或不匹配即拒绝连接；改地址/端口后强制重新确认 |
+| 主机指纹校验（§4、§9） | `server/src/ssh/client.ts`：未确认或不匹配即拒绝连接；首次接入自动信任并记审计，改地址/端口后原指纹作废且必须人工重新确认 |
 | 每 2 小时调度、补采、不重复建批（§4.1） | `collect/scheduler.ts`：`scheduled_slot` 唯一；重启后只为最近时点补建一次，缺口由采集范围覆盖 |
 | 同目标加锁、旧结果不覆盖新结果（§4.1、§13） | `collect/runner.ts`：带租约的目标锁，入库事务内复核租约 |
 | 按日期重算、覆盖快照、不累加（§6） | `collect/ingest.ts`：以“目标+数据源+日期+模型”为唯一键，整日事务性替换 |

@@ -6,10 +6,9 @@ import { SOURCE_INFO, supportedSources } from '../../collect/adapter.js';
 import { getGeneralSettings, type GeneralSettings } from '../../settings.js';
 import { addDays, dateInTz, diffDays, monthKey, monthRange, nextSlot } from '../../util/time.js';
 import type { RouteContext } from '../app.js';
-import { currentUser, HttpError, notFound, parse } from '../http.js';
+import { currentUser, dateStr, HttpError, notFound, parse } from '../http.js';
 import { idParam } from './users.js';
 
-const dateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const DIMENSIONS = {
   date: { select: 'd.usage_date::text', label: 'd.usage_date::text' },
   user: { select: 'd.user_id::text', label: 'u.name' },
@@ -20,7 +19,17 @@ const DIMENSIONS = {
 } as const;
 type Dimension = keyof typeof DIMENSIONS;
 
-// 全为 NULL 时 sum() 返回 NULL：前端据此显示“未知”而不是 0
+/**
+ * 不分组（或带 FILTER）的合计：范围内没有任何用量行 → 0（确实没用）；有行但数值全为 NULL → NULL（未知，前端显示“未知”）。
+ * 裸 sum() 分不清这两种情况，空区间也会得到 NULL。
+ */
+const sumOrZero = (expr: string, filter?: string) => {
+  const f = filter ? ` FILTER (WHERE ${filter})` : '';
+  return `CASE WHEN count(*)${f} = 0 THEN 0 ELSE sum(${expr})${f} END`;
+};
+const MAX_USAGE_ROWS = 20_000;
+
+// 分组查询里每个分组至少有一行，sum() 为 NULL 只可能是“全为 NULL”：前端据此显示“未知”而不是 0
 const MEASURES = `sum(d.total_tokens)::bigint AS "totalTokens", sum(d.input_tokens)::bigint AS "inputTokens", sum(d.output_tokens)::bigint AS "outputTokens",
   sum(d.cache_creation_tokens)::bigint AS "cacheCreationTokens", sum(d.cache_read_tokens)::bigint AS "cacheReadTokens", sum(d.cost_usd)::float8 AS "costUsd"`;
 
@@ -74,8 +83,8 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
   /** 某一天的用量排名：按数据源分列（Claude Code / Codex）并给出合计；返回当日全部有用量的用户，由前端按所选口径取前 10 */
   const dailyRanking = (date: string) => db.query(
     `SELECT u.id AS "userId", u.name, u.team,
-            sum(d.total_tokens) FILTER (WHERE d.source = 'claude-code')::bigint AS "claudeTokens", sum(d.cost_usd) FILTER (WHERE d.source = 'claude-code')::float8 AS "claudeCost",
-            sum(d.total_tokens) FILTER (WHERE d.source = 'codex')::bigint AS "codexTokens", sum(d.cost_usd) FILTER (WHERE d.source = 'codex')::float8 AS "codexCost",
+            ${sumOrZero('d.total_tokens', "d.source = 'claude-code'")}::bigint AS "claudeTokens", ${sumOrZero('d.cost_usd', "d.source = 'claude-code'")}::float8 AS "claudeCost",
+            ${sumOrZero('d.total_tokens', "d.source = 'codex'")}::bigint AS "codexTokens", ${sumOrZero('d.cost_usd', "d.source = 'codex'")}::float8 AS "codexCost",
             sum(d.total_tokens)::bigint AS "totalTokens", sum(d.cost_usd)::float8 AS "totalCost"
        FROM usage_daily d JOIN users u ON u.id = d.user_id WHERE d.usage_date = $1::date
       GROUP BY u.id ORDER BY "totalCost" DESC NULLS LAST, "totalTokens" DESC NULLS LAST LIMIT 500`,
@@ -111,7 +120,16 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
     const [users, servers, models, teams] = await Promise.all([
       db.query('SELECT id, name, team FROM users WHERE ($1::uuid IS NULL OR id = $1) ORDER BY name', [userId]),
       db.query('SELECT DISTINCT s.id, s.name FROM servers s JOIN collection_targets t ON t.server_id = s.id WHERE ($1::uuid IS NULL OR t.user_id = $1) ORDER BY s.name', [userId]),
-      db.query('SELECT DISTINCT model FROM usage_daily WHERE ($1::uuid IS NULL OR user_id = $1) ORDER BY model', [userId]),
+      userId
+        ? db.query('SELECT DISTINCT model FROM usage_daily WHERE user_id = $1 ORDER BY model', [userId]) // 走 (user_id, usage_date) 索引，只扫本人的行
+        // 管理员视角：模型只有几十种、用量行却很多。沿 model 索引逐个跳到下一个不同的值（loose index scan），不做全表 DISTINCT
+        : db.query(
+          `WITH RECURSIVE m AS (
+             (SELECT model FROM usage_daily ORDER BY model LIMIT 1)
+             UNION ALL
+             SELECT (SELECT d.model FROM usage_daily d WHERE d.model > m.model ORDER BY d.model LIMIT 1) FROM m WHERE m.model IS NOT NULL
+           ) SELECT model FROM m WHERE model IS NOT NULL ORDER BY model`,
+        ),
       db.query('SELECT DISTINCT team FROM users WHERE team IS NOT NULL AND ($1::uuid IS NULL OR id = $1) ORDER BY team', [userId]),
     ]);
     return { users: users.rows, servers: servers.rows, models: models.rows.map((r) => r.model), teams: teams.rows.map((r) => r.team) };
@@ -136,9 +154,10 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
         WHERE d.usage_date BETWEEN $1 AND $2
           AND ($3::uuid IS NULL OR d.user_id = $3) AND ($4::uuid IS NULL OR d.server_id = $4)
           AND ($5::text IS NULL OR d.model = $5) AND ($6::text IS NULL OR u.team = $6) AND ($7::text IS NULL OR d.source = $7)
-        GROUP BY ${groups.join(', ')} ORDER BY ${dims[0] === 'date' ? 'key0' : '"costUsd" DESC NULLS LAST, key0'}`,
+        GROUP BY ${groups.join(', ')} ORDER BY ${dims[0] === 'date' ? 'key0' : '"costUsd" DESC NULLS LAST, key0'} LIMIT ${MAX_USAGE_ROWS + 1}`,
       [from, to, userId, q.serverId ?? null, q.model ?? null, q.team ?? null, q.source ?? null],
     );
+    if (res.rows.length > MAX_USAGE_ROWS) throw new HttpError(400, `结果超过 ${MAX_USAGE_ROWS} 行，请缩小日期范围或减少分组维度`, 'TOO_MANY_ROWS');
     return { from, to, groupBy: dims, rows: res.rows };
   });
 
@@ -153,10 +172,10 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
     const trendFrom = addDays(today, -(q.days - 1));
     const scope = '($1::uuid IS NULL OR d.user_id = $1)';
 
-    const [totals, trend, models, ranking, todayRanking, issues] = await Promise.all([
+    const [totals, trend, models, ranking, issues] = await Promise.all([
       db.query(
-        `SELECT sum(d.total_tokens) FILTER (WHERE d.usage_date = $2)::bigint AS "todayTokens", sum(d.cost_usd) FILTER (WHERE d.usage_date = $2)::float8 AS "todayCost",
-                sum(d.total_tokens)::bigint AS "monthTokens", sum(d.cost_usd)::float8 AS "monthCost",
+        `SELECT ${sumOrZero('d.total_tokens', 'd.usage_date = $2')}::bigint AS "todayTokens", ${sumOrZero('d.cost_usd', 'd.usage_date = $2')}::float8 AS "todayCost",
+                ${sumOrZero('d.total_tokens')}::bigint AS "monthTokens", ${sumOrZero('d.cost_usd')}::float8 AS "monthCost",
                 count(DISTINCT d.user_id) FILTER (WHERE d.usage_date = $2)::int AS "activeUsersToday", count(DISTINCT d.user_id)::int AS "activeUsersMonth"
            FROM usage_daily d WHERE ${scope} AND d.usage_date BETWEEN $3 AND $4`,
         [userId, today, month.first, month.last],
@@ -175,13 +194,12 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
         ? db.query(
           `SELECT u.id AS "userId", u.name, u.team, u.monthly_budget_usd::float8 AS "monthlyBudgetUsd",
                   sum(d.total_tokens)::bigint AS "monthTokens", sum(d.cost_usd)::float8 AS "monthCost",
-                  sum(d.total_tokens) FILTER (WHERE d.usage_date = $1)::bigint AS "todayTokens"
+                  ${sumOrZero('d.total_tokens', 'd.usage_date = $1')}::bigint AS "todayTokens"
              FROM usage_daily d JOIN users u ON u.id = d.user_id WHERE d.usage_date BETWEEN $2 AND $3
             GROUP BY u.id ORDER BY "monthCost" DESC NULLS LAST, "monthTokens" DESC NULLS LAST LIMIT 10`,
           [today, month.first, month.last],
         )
         : Promise.resolve({ rows: [] }),
-      me.role === 'admin' ? dailyRanking(today) : Promise.resolve({ rows: [] }),
       db.query(
         `SELECT t.id AS "targetId", s.name AS "serverName", t.data_dir AS "dataDir", u.name AS "userName", t.last_status AS "lastStatus",
                 t.last_error_code AS "lastErrorCode", t.last_error AS "lastError", t.last_success_at AS "lastSuccessAt", t.consecutive_failures AS "consecutiveFailures"
@@ -200,7 +218,6 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
       trend: { from: trendFrom, to: today, rows: trend.rows },
       models: models.rows,
       ranking: ranking.rows,
-      todayRanking: todayRanking.rows,
       // 普通用户只看到“我的来源有异常”，不暴露错误细节里的服务器信息
       issues: me.role === 'admin' ? issues.rows : issues.rows.map((i) => ({ targetId: i.targetId, serverName: i.serverName, lastSuccessAt: i.lastSuccessAt, lastStatus: i.lastStatus })),
     };
@@ -224,8 +241,8 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
 
     const [totals, trend, models, sources, alerts] = await Promise.all([
       db.query(
-        `SELECT sum(total_tokens) FILTER (WHERE usage_date = $2)::bigint AS "todayTokens", sum(cost_usd) FILTER (WHERE usage_date = $2)::float8 AS "todayCost",
-                sum(total_tokens)::bigint AS "monthTokens", sum(cost_usd)::float8 AS "monthCost"
+        `SELECT ${sumOrZero('total_tokens', 'usage_date = $2')}::bigint AS "todayTokens", ${sumOrZero('cost_usd', 'usage_date = $2')}::float8 AS "todayCost",
+                ${sumOrZero('total_tokens')}::bigint AS "monthTokens", ${sumOrZero('cost_usd')}::float8 AS "monthCost"
            FROM usage_daily WHERE user_id = $1 AND usage_date BETWEEN $3 AND $4`,
         [userId, today, month.first, month.last],
       ),
@@ -247,9 +264,9 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
                 x."totalTokens", x."costUsd", COALESCE(x.flagged, false) AS flagged
            FROM collection_targets t JOIN servers s ON s.id = t.server_id
            LEFT JOIN LATERAL (
-             SELECT sum(d.total_tokens)::bigint AS "totalTokens", sum(d.cost_usd)::float8 AS "costUsd", bool_or(d.integrity <> 'complete') AS flagged
+             SELECT count(*) AS n, ${sumOrZero('d.total_tokens')}::bigint AS "totalTokens", ${sumOrZero('d.cost_usd')}::float8 AS "costUsd", bool_or(d.integrity <> 'complete') AS flagged
                FROM usage_daily d WHERE d.target_id = t.id AND d.user_id = $1 AND d.usage_date BETWEEN $2 AND $3) x ON true
-          WHERE t.user_id = $1 OR x."totalTokens" IS NOT NULL ORDER BY s.name, t.data_dir`,
+          WHERE t.user_id = $1 OR x.n > 0 ORDER BY s.name, t.data_dir`,
         [userId, trendFrom, today, staleBefore(settings, now)],
       ),
       db.query(

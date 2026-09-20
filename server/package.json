@@ -16,6 +16,7 @@
     "start:collector": "node dist/main-collector.js",
     "start:mailer": "node dist/main-mailer.js",
     "migrate": "node dist/db/migrate-cli.js",
+    "rotate-master-key": "node dist/security/rotate-cli.js",
     "test": "vitest run"
   },
   "dependencies": {

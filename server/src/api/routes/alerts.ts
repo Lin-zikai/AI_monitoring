@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { supportedSources } from '../../collect/adapter.js';
 import type { RouteContext } from '../app.js';
-import { audit, currentUser, HttpError, mapDbError, notFound, parse } from '../http.js';
+import { audit, currentUser, HttpError, mapDbError, notFound, offsetParam, parse } from '../http.js';
 import { idParam } from './users.js';
 
 const ruleSchema = z.object({
@@ -81,6 +81,7 @@ export async function alertRoutes(app: FastifyInstance, ctx: RouteContext): Prom
       kind: z.enum(['usage', 'collection_failure', 'account_limit']).optional(),
       emailStatus: z.enum(['pending', 'sending', 'sent', 'failed']).optional(),
       limit: z.coerce.number().int().min(1).max(500).default(100),
+      offset: offsetParam,
     }), req.query);
     if (me.role !== 'admin' && q.userId && q.userId !== me.id) throw new HttpError(403, '无权查看其他用户的告警');
     const userId = me.role === 'admin' ? q.userId ?? null : me.id;
@@ -97,8 +98,8 @@ export async function alertRoutes(app: FastifyInstance, ctx: RouteContext): Prom
          LEFT JOIN collection_targets t ON t.id = e.target_id LEFT JOIN servers s ON s.id = t.server_id
          LEFT JOIN email_outbox o ON o.alert_event_id = e.id
         WHERE ($1::uuid IS NULL OR e.user_id = $1) AND ($2::text IS NULL OR e.kind = $2) AND ($3::text IS NULL OR o.status = $3)
-        ORDER BY e.created_at DESC LIMIT $5`,
-      [userId, kind, q.emailStatus ?? null, me.role === 'admin', q.limit],
+        ORDER BY e.created_at DESC, e.id LIMIT $5 OFFSET $6`,
+      [userId, kind, q.emailStatus ?? null, me.role === 'admin', q.limit, q.offset],
     );
     return { events: res.rows };
   });

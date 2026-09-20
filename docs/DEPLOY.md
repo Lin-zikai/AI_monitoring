@@ -25,6 +25,16 @@ docker compose logs -f api collector mailer
 - `secrets/master_key` 是 SSH 私钥与 SMTP 密码的主加密密钥，**不在数据库里，也不在 `.env` 里**。丢失后所有已保存的凭据无法解密，只能重新录入。
 - 首次登录后修改管理员密码，并从 `.env` 删除 `ADMIN_PASSWORD`。
 - 内网无公网证书时，把 `deploy/Caddyfile` 的站点块加上 `tls internal`，或挂载自有证书。
+- `POSTGRES_PASSWORD` 必填（未设置时 Compose 拒绝启动），会被拼进连接串，请用 URL 安全的字符：`openssl rand -hex 24`。
+- `TRUST_PROXY` 决定是否采信 `X-Forwarded-For`：Compose 部署默认 `1`（只信任 Caddy 这一跳）；不经反向代理直接暴露 API 时保持默认的 `false`，否则客户端可以伪造来源 IP 绕过登录限速。
+- 登录会话可吊销：修改或重置密码、调整角色、停用账户、退出登录都会让该账户已签发的会话立即失效。升级到带此功能的版本后，所有人需要重新登录一次。
+- 轮换主密钥（怀疑泄露时）：停掉 `api` / `collector` / `mailer`，生成新密钥后执行
+  ```bash
+  openssl rand -base64 32 > secrets/master_key.new
+  docker compose run --rm -v ./secrets:/keys:ro -e OLD_MASTER_KEY_FILE=/keys/master_key -e NEW_MASTER_KEY_FILE=/keys/master_key.new api node dist/security/rotate-cli.js
+  mv secrets/master_key.new secrets/master_key && docker compose up -d
+  ```
+  所有 SSH 凭据与 SMTP 密码在一个事务里用新密钥重新加密；任何一条解不开都会整体回滚，数据库保持原样。
 
 ## 3. 被采集服务器
 
@@ -37,11 +47,11 @@ docker compose logs -f api collector mailer
 | 装到哪里 | 该账户的 `~/.local/share/usage-monitor/`：采集脚本与配置（几百 KB）。远端已有的 Node.js 直接复用；缺少时才下载（校验 SHA256，约 100 MB） | `/usr/local/bin`、`/etc/ccusage-collect` |
 | 密钥权限 | 密钥本身能登录 shell——密钥泄露等同于该账户泄露，建议仍使用专用账户与专用密钥 | 密钥被 `command="…",restrict` 锁定，只能运行采集脚本 |
 
-自动安装后 ccusage **始终使用最新版**：每次采集都通过 `npx --yes ccusage@latest` 运行，有新版本时自动确认更新后再取数。远端已装过的 ccusage 不会被改动，只在取不到最新版（npm 源不可达）时作为后备；两者都没有时才装一份固定版本。不锁版本号，但平台会对每次结果做结构与合计校验（新版改了输出格式会失败并保留旧数据，而不是入库错误数据），并把 ccusage 版本随每行统计记录在 `price_version`。接口 `POST /api/servers/:id/install-collector` 仍接受 `{"mode": "auto" | "pinned"}`，用于需要复用已装版本或固定版本的场合。
+自动安装后 ccusage **始终使用最新版**：每次采集都通过 `npx --yes ccusage@latest` 运行，有新版本时自动确认更新后再取数。远端已装过的 ccusage 不会被改动，只在取不到最新版（npm 源不可达）时作为后备；两者都没有时才装一份固定版本。不锁版本号，但平台会对每次结果做结构与合计校验（新版改了输出格式会失败并保留旧数据，而不是入库错误数据），并把 ccusage 版本随每行统计记录在 `price_version`。接口 `POST /api/servers/:id/install-collector` 仍接受 `{"mode": "auto" | "pinned"}`，用于需要复用已装版本或固定版本的场合。选定的模式按服务器记录在 `servers.install_mode`：平台自动升级采集脚本或不带 `mode` 重装时都沿用它，不会把固定版本的服务器改回最新版；每次自动升级都会写入审计日志（`server.auto_upgrade_collector`）。
 
 数据源：Claude Code（默认目录 `~/.claude`）与 Codex（默认目录 `~/.codex`）。添加采集目标时可同时勾选，每个数据源各建一个目标。Codex 的总量采用 ccusage 给出的 `totalTokens`（OpenAI 口径下输入可能已含缓存命中，不自行相加）；ccusage 只给出 Codex 的日级费用，平台按各模型 Token 占比分摊到模型行，日合计保持精确。
 
-主机指纹采用“首次连接自动信任”：第一次接入时记录指纹并写入审计日志，之后每次采集都会核对，不一致即拒绝连接（`HOST_KEY_MISMATCH`）；服务器确实重装过时，在“更多 → 主机指纹”里重新确认。对安全要求高的服务器，可在接入后用 `ssh-keygen -lf /etc/ssh/ssh_host_*_key.pub` 核对平台记录的指纹。
+主机指纹采用“首次连接自动信任”：第一次接入时记录指纹并写入审计日志，之后每次采集都会核对，不一致即拒绝连接（`HOST_KEY_MISMATCH`）；服务器确实重装过时，在“更多 → 主机指纹”里重新确认。修改服务器的地址或端口会作废原指纹，这种情况不再自动信任：必须先在“更多 → 主机指纹”里人工核对并确认新指纹，才能重新接入。对安全要求高的服务器，可在接入后用 `ssh-keygen -lf /etc/ssh/ssh_host_*_key.pub` 核对平台记录的指纹。
 
 下面是手工安装的步骤。
 
@@ -57,12 +67,14 @@ ssh root@server-a 'cd /tmp/usage-remote && ./install.sh "ssh-ed25519 AAAA... usa
 然后：
 
 1. 编辑 `/etc/ccusage-collect/config.json` 的 `allowedDirs`，只保留要采集的目录（支持 `*` 匹配单个路径段）。
-2. 给采集账户授予只读权限：
+2. 给采集账户授予只读权限。用量统计只需要 `projects/` 下的会话日志（Codex 为 `~/.codex/sessions/`），**不要**对整个 `~/.claude` 递归授权——里面的 `.credentials.json` 是该用户的登录令牌：
    ```bash
    setfacl -m u:ccusage-collector:x /home/zhangsan
-   setfacl -R -m u:ccusage-collector:rX /home/zhangsan/.claude
-   setfacl -R -d -m u:ccusage-collector:rX /home/zhangsan/.claude   # 新文件自动继承
+   setfacl -m u:ccusage-collector:rx /home/zhangsan/.claude
+   setfacl -R -m u:ccusage-collector:rX /home/zhangsan/.claude/projects
+   setfacl -R -d -m u:ccusage-collector:rX /home/zhangsan/.claude/projects   # 新文件自动继承
    ```
+   账号额度查询（5 小时 / 每周额度）需要读取登录令牌文件，手工安装时默认关闭（`config.json` 的 `"allowAccountQueries": false`）；关闭只影响额度显示，不影响用量采集。确需开启时的单独授权方法见 `install.sh` 安装完成后的提示。
 3. 记下主机指纹，供平台上核对：`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
 
 无法集中授权时，可以不建专用账户：把同一行 `command="…",restrict <公钥>` 加到用户自己的 `~/.ssh/authorized_keys`，并在平台的采集目标上覆盖 SSH 用户名（必要时覆盖凭据）。

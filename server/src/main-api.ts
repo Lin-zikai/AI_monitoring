@@ -22,15 +22,27 @@ if (userCount === 0) {
   logger.info({ email: config.bootstrapAdminEmail }, '已创建初始管理员，请登录后修改密码并移除 ADMIN_PASSWORD');
 }
 
-const queues = createQueues(config.redisUrl, config.collectMaxAttempts);
+// API 进程的队列连接用快速失败模式：Redis 不可用时接口返回 503，而不是一直挂起
+const queues = createQueues(config.redisUrl, config.collectMaxAttempts, { failFast: true });
 const app = await buildApp({ db, config, queues, executor: sshExecutor, scanHostKey, smtpSenderFactory: createSmtpSender });
 await app.listen({ host: config.apiHost, port: config.apiPort });
 
-async function shutdown(): Promise<void> {
-  await app.close();
-  await queues.close();
-  await db.end();
-  process.exit(0);
+// 优雅退出：重复信号只处理一次；15 秒内收不了尾（长连接、Redis/数据库无响应）就强制退出，避免容器停在 stopping
+let shuttingDown = false;
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logger.info({ signal }, '正在退出');
+  setTimeout(() => { logger.error('退出超时，强制结束进程'); process.exit(1); }, 15_000).unref();
+  try {
+    await app.close();
+    await queues.close().catch((err) => logger.warn({ err: (err as Error).message }, '关闭队列连接失败（Redis 可能不可用）'));
+    await db.end();
+    process.exit(0);
+  } catch (err) {
+    logger.error({ err }, '退出过程中出错');
+    process.exit(1);
+  }
 }
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));

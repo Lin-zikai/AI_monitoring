@@ -4,5 +4,7 @@
   "expectedCcusageVersion": "20.0.23",
   "costMode": "auto",
   "offline": true,
-  "timeoutSeconds": 100
+  "timeoutSeconds": 60,
+  "totalTimeoutSeconds": 105,
+  "allowAccountQueries": false
 }

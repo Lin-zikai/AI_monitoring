@@ -6,6 +6,9 @@
 		X-Content-Type-Options nosniff
 		X-Frame-Options DENY
 		Referrer-Policy same-origin
+		# 单页应用：antd 运行时注入样式需要 style-src 'unsafe-inline'；ECharts 画在 canvas 上，导出图片用 data: URL。
+		# 与 server/src/api/app.ts 的 CONTENT_SECURITY_POLICY 保持一致（应用自身也会发送这些头，这里覆盖为同值）
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 	}
 	reverse_proxy api:3000
 }

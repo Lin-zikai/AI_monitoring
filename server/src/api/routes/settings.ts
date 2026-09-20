@@ -3,9 +3,11 @@ import { z } from 'zod';
 import { sanitizeError } from '../../logger.js';
 import { smtpPasswordAad } from '../../mail/transport.js';
 import { seal } from '../../security/crypto.js';
+import { isValidHost } from '../../security/validate.js';
 import { generalSettingsSchema, getGeneralSettings, getLimitAlertSettings, getStoredSmtp, limitAlertSchema, putSetting, smtpSettingsSchema, type StoredSmtp } from '../../settings.js';
 import type { RouteContext } from '../app.js';
-import { audit, HttpError, parse } from '../http.js';
+import { withTx } from '../../db/pool.js';
+import { audit, HttpError, offsetParam, parse } from '../http.js';
 
 const smtpBody = smtpSettingsSchema.extend({
   /** 省略 = 保留原密码；空字符串 = 清除密码 */
@@ -21,9 +23,11 @@ export async function settingsRoutes(app: FastifyInstance, ctx: RouteContext): P
   app.put('/settings/general', admin, async (req) => {
     const body = parse(generalSettingsSchema, req.body);
     const before = await getGeneralSettings(db);
-    await putSetting(db, 'general', body);
-    // 采集周期或时区变更后，重新登记定时调度
-    if (before.collectIntervalHours !== body.collectIntervalHours || before.timezone !== body.timezone) await ctx.queues.syncSchedule(db);
+    // 采集周期或时区变更后要重新登记定时调度；与保存放在同一事务里，队列不可用时设置一并回滚，不留下“设置已改、调度没改”的半截状态
+    await withTx(db, async (tx) => {
+      await putSetting(tx, 'general', body);
+      if (before.collectIntervalHours !== body.collectIntervalHours || before.timezone !== body.timezone) await ctx.queues.syncSchedule(tx);
+    });
     await audit(db, req, 'settings.general.update', 'settings', 'general', { before, after: body });
     return body;
   });
@@ -61,6 +65,9 @@ export async function settingsRoutes(app: FastifyInstance, ctx: RouteContext): P
 
   app.post('/settings/smtp/test', { ...admin, config: { rateLimit: { max: 5, timeWindow: '1 minute' } } }, async (req) => {
     const body = parse(z.object({ to: z.string().email().max(320) }), req.body);
+    // 早期版本保存的 SMTP 地址没有校验过：发起连接前兜底检查
+    const stored = await getStoredSmtp(db);
+    if (stored && !isValidHost(stored.host)) throw new HttpError(400, '已保存的 SMTP 服务器地址不合法，请重新填写后保存');
     const sender = await ctx.smtpSenderFactory(db, config.masterKey);
     if (!sender) throw new HttpError(400, '尚未配置 SMTP');
     try {
@@ -75,11 +82,11 @@ export async function settingsRoutes(app: FastifyInstance, ctx: RouteContext): P
   });
 
   app.get('/audit', admin, async (req) => {
-    const q = parse(z.object({ limit: z.coerce.number().int().min(1).max(500).default(200), entityType: z.string().max(50).optional() }), req.query);
+    const q = parse(z.object({ limit: z.coerce.number().int().min(1).max(500).default(200), offset: offsetParam, entityType: z.string().max(50).optional() }), req.query);
     const res = await db.query(
       `SELECT id, actor_email AS "actorEmail", action, entity_type AS "entityType", entity_id AS "entityId", detail, ip, created_at AS "createdAt"
-         FROM audit_logs WHERE ($1::text IS NULL OR entity_type = $1) ORDER BY id DESC LIMIT $2`,
-      [q.entityType ?? null, q.limit],
+         FROM audit_logs WHERE ($1::text IS NULL OR entity_type = $1) ORDER BY id DESC LIMIT $2 OFFSET $3`,
+      [q.entityType ?? null, q.limit, q.offset],
     );
     return { logs: res.rows };
   });

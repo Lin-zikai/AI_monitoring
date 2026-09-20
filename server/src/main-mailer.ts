@@ -30,11 +30,22 @@ const queues = createQueues(config.redisUrl, config.collectMaxAttempts);
 await queues.syncSchedule(db);
 log.info('邮件 Worker 已启动');
 
-async function shutdown(): Promise<void> {
-  await worker.close();
-  await queues.close();
-  await db.end();
-  process.exit(0);
+// 优雅退出：重复信号只处理一次；15 秒内收不了尾（SMTP 连接卡住、Redis 无响应）就强制退出
+let shuttingDown = false;
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log.info({ signal }, '正在退出');
+  setTimeout(() => { log.error('退出超时，强制结束进程'); process.exit(1); }, 15_000).unref();
+  try {
+    await worker.close();
+    await queues.close();
+    await db.end();
+    process.exit(0);
+  } catch (err) {
+    log.error({ err }, '退出过程中出错');
+    process.exit(1);
+  }
 }
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));

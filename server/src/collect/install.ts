@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isValidCollectCommand } from '../security/validate.js';
+import { isSafeAbsolutePath, isValidCollectCommand } from '../security/validate.js';
 import type { RemoteExecutor, SshTarget } from '../ssh/client.js';
 import { CollectError, collectEnvelope } from './adapter.js';
 
@@ -140,9 +140,10 @@ esac
 if [ "$CC_MODE" = installed ]; then EXPECT="\\"$VERSION\\""; else EXPECT=null; fi
 
 printf '%s' '${collector}' | base64 -d > "$DIR/ccusage-collect.mjs"
-# 该账户本身已有 shell 权限，目录白名单在这里不构成安全边界，放开为任意目录；实际可读范围由系统文件权限决定
+# 该账户本身已有 shell 权限，目录白名单在这里不构成安全边界，放开为任意目录；实际可读范围由系统文件权限决定。
+# 脚本以该用户自己的身份运行，读它自己的登录信息查询账号额度不扩大权限（allowAccountQueries）
 cat > "$DIR/config.json" <<CONFIG
-{ "allowedDirs": ["**"], $CC_JSON, "expectedCcusageVersion": $EXPECT, "costMode": "auto", "offline": true }
+{ "allowedDirs": ["**"], $CC_JSON, "expectedCcusageVersion": $EXPECT, "costMode": "auto", "offline": true, "allowAccountQueries": true }
 CONFIG
 cat > "$DIR/ccusage-collect" <<WRAPPER
 #!/bin/sh
@@ -156,6 +157,9 @@ echo "RESULT $DIR/ccusage-collect $("$NODE_BIN" --version) $VERSION $HOME $CC_MO
 }
 
 const MANAGED_COMMAND = /^(\/.+)\/\.local\/share\/usage-monitor\/ccusage-collect$/;
+
+/** 采集命令是否由平台自动安装并登记（家目录下的固定位置）。手工部署的命令（如 forced command 的 ccusage-collect）平台不去动它。 */
+export const isManagedCommand = (collectCommand: string) => MANAGED_COMMAND.test(collectCommand);
 
 /** 远端账户的家目录：优先从自动安装登记的采集命令反推，否则按惯例猜测。 */
 export function guessRemoteHome(collectCommand: string, sshUsername: string): string {
@@ -185,6 +189,8 @@ export async function installCollector(executor: RemoteExecutor, target: SshTarg
   const [, collectCommand = '', nodeVersion = '', ccusageVersion = '', home = '', mode = '', ...rest] = line.trim().split(' ');
   const ccusagePath = rest.join(' ');
   if (!isValidCollectCommand(collectCommand)) throw new CollectError('INSTALL_FAILED', '远端家目录路径包含不支持的字符，无法自动登记采集命令');
+  // home 来自远端输出，调用方会用它拼出数据目录并放进后续的 SSH 命令行：与其他路径一样先过白名单校验
+  if (!isSafeAbsolutePath(home)) throw new CollectError('INSTALL_FAILED', '远端返回的家目录路径不合法，无法推断数据目录');
   const ccusageMode = mode === 'reused' || mode === 'latest' ? mode : 'installed';
   if (ccusageMode === 'installed' && ccusageVersion !== CCUSAGE_VERSION) throw new CollectError('INSTALL_FAILED', `安装到的 ccusage 版本为 ${ccusageVersion || '未知'}，要求 ${CCUSAGE_VERSION}`);
   return { collectCommand, nodeVersion, ccusageVersion, home, defaultDataDir: `${home}/.claude`, log, ccusageMode, ccusagePath, versionMismatch: ccusageVersion !== CCUSAGE_VERSION };
