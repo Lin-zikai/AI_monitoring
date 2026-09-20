@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { bundledCollectorVersion } from '../src/collect/install.js';
 import { evaluateLimitAlerts, latestAccountLimits, refreshAccountLimits } from '../src/collect/limits.js';
 import { runCollection } from '../src/collect/runner.js';
 import { createAdhocBatch, ensureSlotBatch } from '../src/collect/scheduler.js';
@@ -355,7 +356,7 @@ describe('邮件告警', () => {
 });
 
 describe('账号额度', () => {
-  const reply = (body: object) => ({ stdout: JSON.stringify({ schema: 1, collectorVersion: '1.6.0', ...body }), stderr: '', exitCode: 0 });
+  const reply = (body: object) => ({ stdout: JSON.stringify({ schema: 1, collectorVersion: bundledCollectorVersion(), ...body }), stderr: '', exitCode: 0 });
   const weekly = (used: number) => [{ key: 'seven_day', label: '每周', windowMinutes: 10080, usedPercent: used, resetsAt: '2099-09-22T10:00:00.000Z' }];
 
   it('不同服务器登录不同账号时按账号分别显示；同一账号只向服务商查询一次，令牌过期就换同账号的下一台', async () => {
@@ -395,8 +396,9 @@ describe('账号额度', () => {
     accountOf['server-b.internal'] = accountOf['server-c.internal']!;
     await refreshAccountLimits(deps);
     const after = (await latestAccountLimits(db)).limits;
-    expect(after.map((v) => [v.accountLabel, v.servers])).toEqual([['solo@example.com', ['server-b', 'server-c']], ['team@example.com', ['server-a']]]);
-    expect(after[1]).toMatchObject({ windows: weekly(46), lastError: { code: 'TOKEN_EXPIRED' } }); // 仍显示上一次的读数，并标明最近一次失败
+    // team 账号的登录已过期、查不到当前额度：不再显示，只在 hidden 里留一条说明
+    expect(after.map((v) => [v.accountLabel, v.servers])).toEqual([['solo@example.com', ['server-b', 'server-c']]]);
+    expect((await latestAccountLimits(db)).hidden).toEqual([{ provider: 'claude-code', accountLabel: 'team@example.com', servers: ['server-a'], code: 'TOKEN_EXPIRED', message: '登录令牌已过期' }]);
   });
 
   it('识别不出账号的来源单独列出原因', async () => {
@@ -404,7 +406,7 @@ describe('账号额度', () => {
     const executor = { exec: async () => reply({ status: 'error', code: 'NO_LOGIN', message: '该目录下没有订阅账号的登录信息' }) };
     await refreshAccountLimits({ db, executor, masterKey: (await import('./helpers.js')).masterKey, log: silentLog });
     const view = await latestAccountLimits(db);
-    expect(view).toMatchObject({ limits: [], checked: true, unidentified: [{ provider: 'claude-code', serverName: 'server-a', error: expect.stringContaining('NO_LOGIN') }] });
+    expect(view).toMatchObject({ limits: [], hidden: [], checked: true, unidentified: [{ provider: 'claude-code', serverName: 'server-a', error: expect.stringContaining('NO_LOGIN') }] });
   });
 });
 

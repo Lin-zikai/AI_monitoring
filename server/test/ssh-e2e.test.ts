@@ -181,7 +181,7 @@ else console.log(a[0] === 'codex' ? ${JSON.stringify(codexSample)} : ${JSON.stri
     expect(JSON.parse(readFileSync(join(installDir(), 'config.json'), 'utf8')).expectedCcusageVersion).toBe('20.0.23');
 
     const envelope = await collectWith(result.collectCommand);
-    expect(envelope).toMatchObject({ collectorVersion: '1.6.0', ccusageVersion: '20.0.23' });
+    expect(envelope).toMatchObject({ collectorVersion: '1.7.0', ccusageVersion: '20.0.23' });
     expect(claudeCodeAdapter.parse(envelope.report)[0]).toMatchObject({ model: 'claude-opus-5', totalTokens: 10 });
     expect((await installCollector(sshExecutor, shellTarget, { mode: 'pinned', ccusageSpec: fakePkg, timeoutMs: 120_000 })).collectCommand).toBe(result.collectCommand);
   }, 240_000);

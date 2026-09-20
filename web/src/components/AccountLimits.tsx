@@ -1,5 +1,5 @@
 import { CheckCircleFilled, CloseCircleFilled, ExclamationCircleFilled, ReloadOutlined } from '@ant-design/icons';
-import { Alert, App, Button, Card, Col, Row, Skeleton, Space, Tag, Tooltip, Typography } from 'antd';
+import { Alert, App, Button, Card, Skeleton, Space, Tag, Tooltip, Typography } from 'antd';
 import { useEffect, useState } from 'react';
 import { api, errorMessage } from '../api';
 import { fmtTime } from '../format';
@@ -42,6 +42,7 @@ function remaining(resetsAt: string | null, now: number): string {
   return `${d ? `${d} 天 ` : ''}${d || h ? `${h} 小时 ` : ''}${d ? '' : `${m} 分钟`}后刷新`.replace(/\s+后/, '后');
 }
 
+/** 单行量表：窗口名 · 进度条 · 已用比例 · 状态 · 刷新倒计时 */
 function Meter({ w, now }: { w: LimitWindow; now: number }) {
   const known = w.usedPercent !== null;
   const pct = w.usedPercent ?? 0;
@@ -49,22 +50,19 @@ function Meter({ w, now }: { w: LimitWindow; now: number }) {
   const stale = w.resetsAt !== null && new Date(w.resetsAt).getTime() <= now;
   const level = levelOf(pct);
   return (
-    <div style={{ marginBottom: 14 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
-        <Typography.Text strong>{w.label}额度</Typography.Text>
-        <Space size={6}>
-          {known && !stale && <span style={{ color: level.color, fontSize: 12 }}>{level.icon} <Typography.Text style={{ fontSize: 12 }}>{level.text}</Typography.Text></span>}
-          <Typography.Text style={{ fontSize: 18, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{known ? `${pct}%` : '未知'}</Typography.Text>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>已用</Typography.Text>
-        </Space>
-      </div>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 380px', minWidth: 0 }}>
+      <Typography.Text style={{ width: 48, flex: 'none' }}>{w.label}</Typography.Text>
       <Tooltip title={known ? `已用 ${pct}%，剩余 ${Math.round((100 - pct) * 10) / 10}%` : undefined}>
         <div role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={known ? pct : undefined} aria-label={`${w.label}额度已用比例`}
-          style={{ height: 10, borderRadius: 5, background: '#eef0f3', overflow: 'hidden' }}>
-          <div style={{ width: `${pct}%`, minWidth: known && pct > 0 ? 4 : 0, height: '100%', borderRadius: 5, background: stale ? '#b9bec7' : level.color, transition: 'width .3s' }} />
+          style={{ flex: '1 1 120px', minWidth: 80, maxWidth: 260, height: 8, borderRadius: 4, background: '#eef0f3', overflow: 'hidden' }}>
+          <div style={{ width: `${pct}%`, minWidth: known && pct > 0 ? 4 : 0, height: '100%', borderRadius: 4, background: stale ? '#b9bec7' : level.color, transition: 'width .3s' }} />
         </div>
       </Tooltip>
-      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+      <Typography.Text style={{ width: 84, flex: 'none', textAlign: 'right', fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{known ? `已用 ${pct}%` : '未知'}</Typography.Text>
+      {known && !stale
+        ? <span style={{ color: level.color, fontSize: 12, width: 72, flex: 'none' }}>{level.icon} <Typography.Text style={{ fontSize: 12 }}>{level.text}</Typography.Text></span>
+        : <span style={{ width: 72, flex: 'none' }} />}
+      <Typography.Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {remaining(w.resetsAt, now)}{w.resetsAt && !stale ? `（${fmtTime(w.resetsAt)}）` : ''}
       </Typography.Text>
     </div>
@@ -74,7 +72,7 @@ function Meter({ w, now }: { w: LimitWindow; now: number }) {
 /** 账号额度：服务商侧 5 小时 / 周额度的已用比例与刷新时间；不同服务器登录不同账号时按账号分别显示 */
 export function AccountLimitsCard() {
   const { message } = App.useApp();
-  const { data, loading, reload } = useFetch(() => api.get<{ limits: AccountLimit[]; unidentified: Array<{ provider: string; serverName: string; dataDir: string; error: string }>; checked: boolean }>('/limits'), []);
+  const { data, loading, reload } = useFetch(() => api.get<{ limits: AccountLimit[]; hidden: Array<{ provider: string; accountLabel: string | null; servers: string[]; code: string; message: string }>; unidentified: Array<{ provider: string; serverName: string; dataDir: string; error: string }>; checked: boolean }>('/limits'), []);
   const [refreshing, setRefreshing] = useState(false);
   const [now, setNow] = useState(Date.now());
 
@@ -102,34 +100,38 @@ export function AccountLimitsCard() {
       {loading && !data ? <Skeleton active paragraph={{ rows: 3 }} /> : (
         <>
           {(data?.limits ?? []).length === 0 && (
-            <Alert type="info" showIcon title={data?.checked ? '没有识别到订阅账号' : '还没有查询过账号额度'} description="添加服务器并完成首次采集后，点右上角“立即查询”。" />
+            <Alert type="info" showIcon title={data?.checked ? '没有可显示的订阅账号' : '还没有查询过账号额度'} description="添加服务器并完成首次采集后，点右上角“立即查询”。" />
           )}
-          <Row gutter={[32, 16]}>
-            {(data?.limits ?? []).map((a) => (
-              <Col key={`${a.provider}:${a.accountKey}`} xs={24} md={12} xl={(data?.limits.length ?? 0) > 2 ? 8 : 12}>
-                <div style={{ marginBottom: 10 }}>
-                  <Space size={8} wrap>
-                    <Typography.Text strong style={{ fontSize: 15 }}>{PROVIDER_LABEL[a.provider] ?? a.provider}</Typography.Text>
-                    {a.plan && <Tag>{a.plan}</Tag>}
+          {/* 竖排：数据源 → 邮箱 → 用量。账号再多也只是往下延伸 */}
+          {Object.keys(PROVIDER_LABEL).filter((p) => (data?.limits ?? []).some((a) => a.provider === p)).map((provider, pi) => (
+            <div key={provider} style={{ marginTop: pi === 0 ? 0 : 16 }}>
+              <Typography.Text strong style={{ fontSize: 15 }}>{PROVIDER_LABEL[provider]}</Typography.Text>
+              {(data?.limits ?? []).filter((a) => a.provider === provider).map((a, ai) => (
+                <div key={a.accountKey} style={{ padding: '10px 0', borderTop: ai === 0 ? 'none' : '1px solid #f0f0f0' }}>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', columnGap: 10, marginBottom: 6 }}>
                     <Typography.Text copyable={a.accountLabel ? { text: a.accountLabel } : false}>{a.accountLabel ?? `账号 ${a.accountKey.slice(0, 8)}…`}</Typography.Text>
-                  </Space>
-                  <div><Typography.Text type="secondary" style={{ fontSize: 12 }}>使用该账号的服务器：{a.servers.join('、')}</Typography.Text></div>
+                    {a.plan && <Tag style={{ marginInlineEnd: 0 }}>{a.plan}</Tag>}
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      服务器：{a.servers.join('、')} · 更新于 {fmtTime(a.fetchedAt)}
+                      {a.lastError && <Tooltip title={limitErrorText(a.lastError.code, a.lastError.message)}><span style={{ color: '#c98a00' }}> · 最近一次查询失败，显示的是上一次的结果</span></Tooltip>}
+                    </Typography.Text>
+                  </div>
+                  {a.windows.length === 0
+                    ? <Typography.Text type="warning" style={{ fontSize: 12 }}>{a.lastError ? limitErrorText(a.lastError.code, a.lastError.message) : '还没有查询到额度'}</Typography.Text>
+                    : <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: 32, rowGap: 6 }}>{a.windows.map((w) => <Meter key={w.key} w={w} now={now} />)}</div>}
                 </div>
-                {a.windows.length === 0
-                  ? <Alert type="warning" showIcon title={a.lastError ? limitErrorText(a.lastError.code, a.lastError.message) : '还没有查询到额度'} />
-                  : a.windows.map((w) => <Meter key={w.key} w={w} now={now} />)}
-                {a.windows.length > 0 && !a.windows.some((w) => w.key === 'five_hour') && (
-                  <div style={{ marginBottom: 10 }}><Typography.Text type="secondary" style={{ fontSize: 12 }}>服务商目前没有给这个账号设置 5 小时窗口，只有上面的周额度。</Typography.Text></div>
-                )}
-                {a.windows.length > 0 && (
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    数据更新于 {fmtTime(a.fetchedAt)}{a.serverName ? ` · 经 ${a.serverName} 查询` : ''}
-                    {a.lastError && <Tooltip title={a.lastError.message}><span style={{ color: '#c98a00' }}> · 最近一次查询失败（{fmtTime(a.lastError.at)}）：{limitErrorText(a.lastError.code, a.lastError.message)}显示的是上一次的结果</span></Tooltip>}
-                  </Typography.Text>
-                )}
-              </Col>
-            ))}
-          </Row>
+              ))}
+            </div>
+          ))}
+          {(data?.hidden ?? []).length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <Tooltip title={<div>{data!.hidden.map((h) => <div key={`${h.provider}:${h.accountLabel}`}>{PROVIDER_LABEL[h.provider] ?? h.provider} · {h.accountLabel ?? '未知账号'}（{h.servers.join('、')}）：{limitErrorText(h.code, h.message)}</div>)}</div>} styles={{ root: { maxWidth: 560 } }}>
+                <Typography.Text type="secondary" style={{ fontSize: 12, cursor: 'help', borderBottom: '1px dashed #c0c4cc' }}>
+                  另有 {data!.hidden.length} 个账号的登录已过期，查不到额度，未显示
+                </Typography.Text>
+              </Tooltip>
+            </div>
+          )}
           {(data?.unidentified ?? []).length > 0 && (
             <div style={{ marginTop: 12 }}>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>

@@ -22,7 +22,7 @@ import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-const COLLECTOR_VERSION = '1.6.0';
+const COLLECTOR_VERSION = '1.7.0';
 const CONFIG_PATH = process.env.CCUSAGE_COLLECT_CONFIG || '/etc/ccusage-collect/config.json';
 const SAFE_PATH = /^\/[A-Za-z0-9._@+\-/]*$/;
 // requireLogRoot：Claude 没有 projects/ 时 ccusage 会报错，视为“确实没有用量”；Codex 的记录位置随版本变化（sessions/ 或 sqlite），交给 ccusage 判断
@@ -192,6 +192,22 @@ const LIMIT_PROVIDERS = {
   },
 };
 
+/**
+ * 该账户实际使用的数据目录：CLI 支持用环境变量改目录（CLAUDE_CONFIG_DIR、CODEX_HOME），而这些变量通常写在 shell 配置里，
+ * 非交互 SSH 会话看不到。从登录 shell 里读出来回报给平台，避免采集到一个早已不用的默认目录。
+ */
+async function configuredDirs() {
+  const login = await run('bash', ['-lc', 'env'], { PATH: process.env.PATH, HOME: process.env.HOME }, 8000);
+  const env = { ...process.env };
+  if (!login.error) for (const line of String(login.stdout).split('\n')) { const i = line.indexOf('='); if (i > 0) env[line.slice(0, i)] = line.slice(i + 1); }
+  const dirs = {};
+  for (const [name, source] of Object.entries(SOURCES)) {
+    const value = (env[source.dirEnv] ?? '').split(',')[0].trim().replace(/\/+$/, '');
+    if (value && SAFE_PATH.test(value) && !value.split('/').includes('..') && existsSync(value)) dirs[name] = value;
+  }
+  return dirs;
+}
+
 /** --limits：查询额度；--identity：只报告账号标识（不联网） */
 async function mainAccount(args) {
   const provider = args.limits ?? args.identity;
@@ -215,6 +231,7 @@ async function mainAccount(args) {
 
 async function main() {
   const args = parseArgs();
+  echo.configDirs = await configuredDirs();
   if (args.limits !== undefined || args.identity !== undefined) return mainAccount(args);
   const source = SOURCES[args.source];
   if (!source) fail('UNSUPPORTED_SOURCE', '不支持的数据源');

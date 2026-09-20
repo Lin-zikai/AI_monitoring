@@ -206,6 +206,8 @@ export const collectEnvelope = z.object({
   message: z.string().max(2000).optional(),
   collectorVersion: z.string().max(32).optional(),
   home: z.string().max(512).optional(),
+  /** 远端账户通过环境变量（CLAUDE_CONFIG_DIR / CODEX_HOME）指定的实际数据目录 */
+  configDirs: z.record(z.string(), z.string().max(512)).optional(),
   ccusageVersion: z.string().max(32).optional(),
   source: z.string().optional(),
   dir: z.string().optional(),

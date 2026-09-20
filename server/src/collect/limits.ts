@@ -9,15 +9,17 @@ import { isSafeAbsolutePath, isValidCollectCommand } from '../security/validate.
 import type { RemoteExecutor, SshTarget } from '../ssh/client.js';
 import { getGeneralSettings, getLimitAlertSettings } from '../settings.js';
 import { CollectError, SOURCE_INFO, supportedSources } from './adapter.js';
-import { installCollector } from './install.js';
+import { bundledCollectorVersion, installCollector, isOlderVersion } from './install.js';
 
 // 账号额度：由被采集服务器上的采集脚本就地查询（登录令牌不离开那台机器），平台只拿到已用百分比与刷新时间。
 
 const limitsEnvelope = z.object({
   schema: z.literal(1),
   status: z.enum(['ok', 'error']),
+  collectorVersion: z.string().max(32).optional(),
   code: z.string().max(64).optional(),
   message: z.string().max(2000).optional(),
+  configDirs: z.record(z.string(), z.string().max(512)).optional(),
   accountKey: z.string().max(128).nullish(),
   accountLabel: z.string().max(320).nullish(),
   plan: z.string().max(64).nullish(),
@@ -74,16 +76,24 @@ async function ask(deps: LimitsDeps, c: Candidate, mode: 'limits' | 'identity', 
   return env.data;
 }
 
-/** 旧版采集脚本不认识新参数（BAD_ARGS）：自动安装的服务器先升级脚本再试一次 */
+/** 远端采集脚本落后于平台随附的版本（或不认识新参数）时：自动安装的服务器先升级脚本再试一次；受限密钥的服务器升级不了，沿用旧结果 */
 async function askWithUpgrade(deps: LimitsDeps, c: Candidate, mode: 'limits' | 'identity', provider: string, upgraded: Set<string>) {
-  try {
-    return await ask(deps, c, mode, provider);
-  } catch (err) {
-    if (!(err instanceof CollectError && err.code === 'BAD_ARGS') || upgraded.has(c.server_id)) throw err;
+  const upgrade = async () => {
     upgraded.add(c.server_id);
     c.collect_command = (await installCollector(deps.executor, c.ssh)).collectCommand;
+  };
+  let first;
+  try {
+    first = await ask(deps, c, mode, provider);
+  } catch (err) {
+    if (!(err instanceof CollectError && err.code === 'BAD_ARGS') || upgraded.has(c.server_id)) throw err;
+    await upgrade();
     return ask(deps, c, mode, provider);
   }
+  if (mode === 'identity' && !upgraded.has(c.server_id) && isOlderVersion(first.collectorVersion, bundledCollectorVersion())) {
+    try { await upgrade(); return await ask(deps, c, mode, provider); } catch (err) { deps.log.warn({ server: c.server_name }, `采集脚本自动升级未成功，沿用旧版本: ${sanitizeError(err)}`); }
+  }
+  return first;
 }
 
 async function inBatches<T>(items: T[], size: number, fn: (item: T) => Promise<void>): Promise<void> {
@@ -107,7 +117,10 @@ export async function refreshAccountLimits(deps: LimitsDeps): Promise<LimitsOutc
         const id = await askWithUpgrade(deps, c, 'identity', provider, upgraded);
         c.accountKey = id.accountKey ?? undefined;
         c.accountLabel = id.accountLabel ?? null;
-        await deps.db.query('UPDATE collection_targets SET account_key = $2, account_label = $3, account_checked_at = now(), account_error = NULL WHERE id = $1', [c.target_id, c.accountKey ?? null, c.accountLabel]);
+        // 该账户用环境变量把数据目录改到了别处，而平台采集的不是那个目录：记下来提示管理员
+        const actual = id.configDirs?.[provider];
+        const hint = actual && actual !== c.data_dir && isSafeAbsolutePath(actual) ? actual : null;
+        await deps.db.query('UPDATE collection_targets SET account_key = $2, account_label = $3, account_checked_at = now(), account_error = NULL, dir_hint = $4 WHERE id = $1', [c.target_id, c.accountKey ?? null, c.accountLabel, hint]);
       } catch (err) {
         const code = err instanceof CollectError ? err.code : 'ERROR';
         deps.log.warn({ provider, server: c.server_name, code }, `识别登录账号失败: ${sanitizeError(err)}`);
@@ -162,7 +175,12 @@ export interface LimitsView {
 export interface UnidentifiedSource { provider: string; serverName: string; dataDir: string; error: string }
 
 /** 当前各采集目标登录的账号（去重），以及每个账号最近一次的额度快照 */
-export async function latestAccountLimits(db: Db): Promise<{ limits: LimitsView[]; unidentified: UnidentifiedSource[]; checked: boolean }> {
+export interface HiddenAccount { provider: string; accountLabel: string | null; servers: string[]; code: string; message: string }
+
+// 登录已过期 / 被吊销 / 没有订阅登录的账号查不到当前额度：不占版面，只汇总成一行说明
+const HIDE_CODES = new Set(['TOKEN_EXPIRED', 'NO_LOGIN']);
+
+export async function latestAccountLimits(db: Db): Promise<{ limits: LimitsView[]; hidden: HiddenAccount[]; unidentified: UnidentifiedSource[]; checked: boolean }> {
   const active = "t.enabled AND s.enabled AND t.last_status = 'success' AND t.last_error_code IS DISTINCT FROM 'NO_DATA_DIR'";
   const accounts = (await db.query(
     `SELECT t.source AS provider, t.account_key, max(t.account_label) AS account_label, array_agg(DISTINCT s.name ORDER BY s.name) AS servers
@@ -179,7 +197,7 @@ export async function latestAccountLimits(db: Db): Promise<{ limits: LimitsView[
       WHERE ${active} AND t.account_key IS NULL AND t.account_error IS NOT NULL ORDER BY t.source, s.name`,
   )).rows;
   const checked = (await db.query('SELECT 1 FROM collection_targets WHERE account_checked_at IS NOT NULL LIMIT 1')).rowCount !== 0;
-  const limits = accounts.map((a) => {
+  const all = accounts.map((a) => {
     const ok = snaps.find((r) => r.provider === a.provider && r.account_key === a.account_key && r.status === 'ok');
     const bad = snaps.find((r) => r.provider === a.provider && r.account_key === a.account_key && r.status === 'error');
     const errorIsNewer = bad && (!ok || bad.fetched_at > ok.fetched_at);
@@ -189,7 +207,10 @@ export async function latestAccountLimits(db: Db): Promise<{ limits: LimitsView[
       lastError: errorIsNewer ? { code: bad.error_code, message: bad.error_message, at: bad.fetched_at.toISOString() } : null,
     };
   });
-  return { limits, unidentified, checked };
+  const limits = all.filter((a) => !(a.lastError && HIDE_CODES.has(a.lastError.code)));
+  const hidden = all.filter((a) => a.lastError && HIDE_CODES.has(a.lastError.code))
+    .map((a) => ({ provider: a.provider, accountLabel: a.accountLabel, servers: a.servers, code: a.lastError!.code, message: a.lastError!.message }));
+  return { limits, hidden, unidentified, checked };
 }
 
 /**

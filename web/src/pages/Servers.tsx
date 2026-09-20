@@ -596,6 +596,25 @@ function RunsDrawer({ state, onClose }: { state: { targetId?: string; title: str
   );
 }
 
+/** 远端用环境变量改了数据目录、而平台采集的不是那个目录：提示并一键改正 */
+function DirHint({ t, onFixed }: { t: Target; onFixed: () => void }) {
+  const { message, modal } = App.useApp();
+  if (!t.dirHint) return null;
+  const fix = () => modal.confirm({
+    title: '改为采集实际使用的目录？', okText: '改用该目录并重新采集',
+    content: <div><Paragraph>这个账户通过环境变量把 {t.source === 'codex' ? 'Codex（CODEX_HOME）' : 'Claude Code（CLAUDE_CONFIG_DIR）'} 的数据目录设成了：</Paragraph><Paragraph><Text code>{t.dirHint}</Text></Paragraph><Paragraph style={{ marginBottom: 0 }}>平台现在采集的是 <Text code>{t.dataDir}</Text>，很可能是一个已经不用的旧目录，用量和账号额度都会不准。</Paragraph></div>,
+    onOk: async () => {
+      try {
+        await api.patch(`/targets/${t.id}`, { dataDir: t.dirHint });
+        await api.post(`/targets/${t.id}/collect`);
+        message.success('已改用实际目录，并开始重新采集');
+        onFixed();
+      } catch (err) { message.error(errorMessage(err)); }
+    },
+  });
+  return <Tooltip title={`实际使用的目录是 ${t.dirHint}，点击改正`}><Tag color="warning" style={{ cursor: 'pointer', marginLeft: 8 }} onClick={fix}>目录可能不对</Tag></Tooltip>;
+}
+
 function targetStatus(t: Target) {
   if (t.collecting) return <Badge status="processing" text="采集中" />;
   if (!t.enabled) return <Badge status="default" text="已停用" />;
@@ -718,7 +737,7 @@ export function ServersPage() {
       locale={{ emptyText: '尚未添加采集目标' }}
       footer={() => <Button size="small" icon={<PlusOutlined />} onClick={() => setTargetModal({ server: s, target: null })}>添加采集目标</Button>}
       columns={[
-        { title: '数据目录', render: (_v, t) => <Space size={4} wrap><Text code>{t.dataDir}</Text>{t.sharedAccount && <Tag color="purple">共享账户</Tag>}{t.hasFlaggedData && <Tooltip title="存在保留的历史值或异常减少标记，见采集记录"><Tag color="warning">待核查</Tag></Tooltip>}</Space> },
+        { title: '数据目录', render: (_v, t) => <Space size={4} wrap><Text code>{t.dataDir}</Text>{t.sharedAccount && <Tag color="purple">共享账户</Tag>}{t.hasFlaggedData && <Tooltip title="存在保留的历史值或异常减少标记，见采集记录"><Tag color="warning">待核查</Tag></Tooltip>}<DirHint t={t} onFixed={reload} /></Space> },
         { title: '绑定用户', dataIndex: 'userName' },
         { title: '数据源', dataIndex: 'source', render: (v: string) => sourceLabel(v) },
         { title: 'SSH 登录', render: (_v, t) => (t.sshUsername || t.credentialId ? <Tooltip title="该目标覆盖了服务器级 SSH 登录"><Tag>{t.sshUsername ?? s.sshUsername} · 单独配置</Tag></Tooltip> : <Text type="secondary">同服务器</Text>) },

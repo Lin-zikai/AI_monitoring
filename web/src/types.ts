@@ -94,7 +94,7 @@ export interface Target {
   id: string; serverId: string; userId: string; userName: string; source: string; dataDir: string;
   sshUsername: string | null; credentialId: string | null; sharedAccount: boolean; sourceStartDate: string | null; sourceEndDate: string | null;
   enabled: boolean; initializedAt: string | null; lastAttemptAt: string | null; lastSuccessAt: string | null; lastStatus: string | null;
-  lastErrorCode: string | null; lastError: string | null; consecutiveFailures: number; missingOk: boolean; collecting: boolean; hasFlaggedData: boolean;
+  lastErrorCode: string | null; lastError: string | null; consecutiveFailures: number; missingOk: boolean; dirHint: string | null; collecting: boolean; hasFlaggedData: boolean;
 }
 
 export interface Server {

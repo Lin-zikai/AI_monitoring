@@ -162,7 +162,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
               t.source_start_date AS "sourceStartDate", t.source_end_date AS "sourceEndDate", t.enabled,
               t.initialized_at AS "initializedAt", t.last_attempt_at AS "lastAttemptAt", t.last_success_at AS "lastSuccessAt",
               t.last_status AS "lastStatus", t.last_error_code AS "lastErrorCode", t.last_error AS "lastError",
-              t.consecutive_failures AS "consecutiveFailures", t.missing_ok AS "missingOk",
+              t.consecutive_failures AS "consecutiveFailures", t.missing_ok AS "missingOk", t.dir_hint AS "dirHint",
               (t.lock_run_id IS NOT NULL AND t.lock_expires_at > now()) AS "collecting",
               EXISTS (SELECT 1 FROM usage_daily d WHERE d.target_id = t.id AND d.integrity <> 'complete') AS "hasFlaggedData"
          FROM collection_targets t JOIN users u ON u.id = t.user_id ORDER BY t.data_dir`,
@@ -316,6 +316,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
 
     // 2. 采集组件：已有就用，没有则经 SSH 自动安装
     let collectCommand: string = server.collect_command;
+    let configDirs: Record<string, string> = {}; // 远端用环境变量指定的实际数据目录（CODEX_HOME 等）
     let reportedHome: string | undefined; // 采集脚本应答里带的家目录（受限密钥的服务器无法从命令路径反推）
     try {
       const { ssh } = await loadSshTarget(serverId);
@@ -325,12 +326,14 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
         const envelope = collectEnvelope.safeParse(JSON.parse(probe.stdout));
         installed = envelope.success;
         if (envelope.success && envelope.data.home && isSafeAbsolutePath(envelope.data.home)) reportedHome = envelope.data.home;
+        if (envelope.success && envelope.data.configDirs) configDirs = envelope.data.configDirs;
       } catch { /* 不是采集脚本的应答 */ }
       if (installed) done('collector', true, '采集组件已就绪');
       else {
         const result = await installCollector(ctx.executor, ssh);
         collectCommand = result.collectCommand;
         reportedHome = result.home;
+        try { configDirs = collectEnvelope.parse(JSON.parse((await ctx.executor.exec(ssh, collectCommand, 30_000)).stdout)).configDirs ?? {}; } catch { /* 拿不到就用默认目录 */ }
         await db.query('UPDATE servers SET collect_command = $2, updated_at = now() WHERE id = $1', [serverId, collectCommand]);
         await audit(db, req, 'server.install_collector', 'server', serverId, { collectCommand, ccusageVersion: result.ccusageVersion, ccusageMode: result.ccusageMode });
         done('collector', true, `已安装采集组件（ccusage ${result.ccusageVersion}）`);
@@ -348,7 +351,8 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
     const targetIds = await withTx(db, async (tx) => {
       const ids: string[] = [];
       for (const source of supportedSources()) {
-        const dataDir = `${home}/${SOURCE_INFO[source]?.defaultDirName ?? `.${source}`}`;
+        const configured = configDirs[source];
+        const dataDir = configured && isSafeAbsolutePath(configured) ? configured : `${home}/${SOURCE_INFO[source]?.defaultDirName ?? `.${source}`}`;
         const existing = (await tx.query('SELECT id FROM collection_targets WHERE server_id = $1 AND source = $2', [serverId, source])).rows[0];
         if (existing) { ids.push(existing.id); continue; }
         const created = (await tx.query(
@@ -436,7 +440,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: RouteContext): Pro
     const has = (k: keyof typeof body) => Object.hasOwn(body, k);
     const res = await db.query(
       `UPDATE collection_targets SET
-              data_dir = CASE WHEN $2 THEN $3 ELSE data_dir END,
+              data_dir = CASE WHEN $2 THEN $3 ELSE data_dir END, dir_hint = CASE WHEN $2 THEN NULL ELSE dir_hint END,
               ssh_username = CASE WHEN $4 THEN $5 ELSE ssh_username END,
               credential_id = CASE WHEN $6 THEN $7::uuid ELSE credential_id END,
               shared_account = COALESCE($8, shared_account),

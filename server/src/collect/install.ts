@@ -19,6 +19,17 @@ const NODE_SHA256 = {
 const COLLECTOR_PATH = process.env.COLLECTOR_SCRIPT_PATH
   ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'remote', 'ccusage-collect.mjs');
 
+/** 平台随附的采集脚本版本（从脚本文件里读出）：远端版本落后时自动升级 */
+export function bundledCollectorVersion(): string {
+  return /COLLECTOR_VERSION = '([0-9.]+)'/.exec(readFileSync(COLLECTOR_PATH, 'utf8'))?.[1] ?? '0.0.0';
+}
+
+export function isOlderVersion(actual: string | undefined, required: string): boolean {
+  const a = (actual ?? '0').split('.').map(Number); const b = required.split('.').map(Number);
+  for (let i = 0; i < 3; i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) < (b[i] ?? 0);
+  return false;
+}
+
 /** 生成安装脚本。除 base64 编码的采集脚本与固定常量外不含任何外部输入。 */
 export type InstallMode = 'auto' | 'latest' | 'pinned';
 
