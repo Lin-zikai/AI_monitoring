@@ -1,15 +1,16 @@
-import { Alert, Card, DatePicker, Segmented, Select, Table, Tag } from 'antd';
+import { Alert, Card, DatePicker, Segmented, Select, Table, Tag, Typography } from 'antd';
 import dayjs, { type Dayjs } from 'dayjs';
 import { useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { RankBarChart, StackedTrendChart, type ChartMetric } from '../components/charts';
 import { CostCell, FilterBar, PageTitle, TokenCell } from '../components/common';
 import { useStatsToday } from '../components/Layout';
-import { num } from '../format';
+import { fmtTokens, num } from '../format';
 import { useFetch } from '../hooks';
 import { METRIC_OPTIONS } from '../options';
 import { useIsMobile } from '../responsive';
-import type { Dimension, Filters, UsageResponse, UsageRow } from '../types';
+import type { Dimension, Filters, UsageLeader, UsageResponse, UsageRow } from '../types';
 
 const DIM_LABEL: Record<Dimension, string> = { date: '日期', user: '用户', server: '服务器', model: '模型', source: '数据源', team: '团队' };
 
@@ -25,6 +26,21 @@ const presetsFor = (today: string): Array<{ label: string; value: [Dayjs, Dayjs]
   ];
 };
 
+/** 用量最多的 3 个用户：每人一行，名字可点进用户详情 */
+function Leaders({ list }: { list?: UsageLeader[] }) {
+  if (!list || list.length === 0) return <Typography.Text type="secondary">—</Typography.Text>;
+  return (
+    <div style={{ lineHeight: 1.6 }}>
+      {list.map((l, i) => (
+        <div key={l.userId} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, whiteSpace: 'nowrap' }}>
+          <span><Typography.Text type="secondary" style={{ fontSize: 12, marginRight: 4 }}>{i + 1}</Typography.Text><Link to={`/users/${l.userId}`}>{l.name}</Link></span>
+          <Typography.Text type="secondary">{fmtTokens(l.tokens)}</Typography.Text>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function UsagePage() {
   const today = useStatsToday();
   const presets = useMemo(() => presetsFor(today), [today]);
@@ -34,7 +50,7 @@ export function UsagePage() {
   const [model, setModel] = useState<string>();
   const [team, setTeam] = useState<string>();
   const [primary, setPrimary] = useState<Dimension>('date');
-  const [secondary, setSecondary] = useState<Dimension | 'none'>('model');
+  const [secondary, setSecondary] = useState<Dimension | 'none'>('none');
   const [metric, setMetric] = useState<ChartMetric>('tokens');
   const isMobile = useIsMobile();
 
@@ -49,11 +65,18 @@ export function UsagePage() {
     { keepPrevious: true }, // 响应自带 from / to / groupBy，加载期间沿用上一份结果不会张冠李戴
   );
 
-  const rows = usage.data?.rows ?? [];
+  const rawRows = usage.data?.rows;
   const valueOf = (r: UsageRow) => (metric === 'cost' ? r.costUsd : num(r.totalTokens));
   // 图表与数据保持同一帧：用响应里的 groupBy，而不是尚未返回结果的新选择
   const shown = usage.data?.groupBy ?? dims;
   const byDate = shown[0] === 'date';
+  // 按日期分组时最近的日期排在最前面（同一天内用量大的在前）；图表自己按日期铺 x 轴，不受这里的顺序影响
+  const rows = useMemo(() => {
+    const list = rawRows ?? [];
+    return byDate ? [...list].sort((a, b) => (a.key0 < b.key0 ? 1 : a.key0 > b.key0 ? -1 : (num(b.totalTokens) ?? -1) - (num(a.totalTokens) ?? -1))) : list;
+  }, [rawRows, byDate]);
+  const showLeaders = Boolean(usage.data?.leaders);
+  const anchorHint = byDate ? '该行日期' : `${usage.data?.to ?? to}（范围的最后一天）`;
 
   const trendPoints = useMemo(() => (byDate ? rows.map((r) => ({
     date: r.key0, seriesKey: r.key1 ?? 'total', seriesLabel: r.label1 ?? (metric === 'cost' ? '估算费用' : 'Token'), value: valueOf(r),
@@ -116,8 +139,16 @@ export function UsagePage() {
       <Card size="small" title="明细" styles={isMobile ? { body: { padding: 0 } } : undefined}>
         <Table<UsageRow>
           size="small" loading={usage.loading} dataSource={rows} rowKey={(r) => `${r.key0}|${r.key1 ?? ''}`}
-          // 手机：输入 / 输出 / 缓存四列隐藏（responsive），其余按内容宽度横向滚动，首列固定在左侧
-          scroll={{ x: isMobile ? 'max-content' : 900 }}
+          // 手机：按内容宽度横向滚动，首列固定在左侧；“用量最多”两列放进展开行
+          scroll={{ x: isMobile ? 'max-content' : 820 }}
+          expandable={isMobile && showLeaders ? {
+            expandedRowRender: (r) => (
+              <div style={{ display: 'grid', gap: 8 }}>
+                <div><Typography.Text type="secondary" style={{ fontSize: 12 }}>近 7 天用量最多</Typography.Text><Leaders list={r.top7} /></div>
+                <div><Typography.Text type="secondary" style={{ fontSize: 12 }}>近 1 天用量最多</Typography.Text><Leaders list={r.top1} /></div>
+              </div>
+            ),
+          } : undefined}
           pagination={isMobile ? { pageSize: 50, simple: true, showSizeChanger: false } : { pageSize: 50, showSizeChanger: true, showTotal: (n) => `共 ${n} 行` }}
           columns={[
             // 手机：第二个维度并到首列下面（小字），Token 与费用两列不用横向滚动就能看到
@@ -132,11 +163,11 @@ export function UsagePage() {
             },
             ...(shown[1] && !isMobile ? [{ title: DIM_LABEL[shown[1]], render: (_v: unknown, r: UsageRow) => r.label1 || '未分组' }] : []),
             { title: '总 Token', align: 'right' as const, render: (_v, r) => <TokenCell value={r.totalTokens} />, sorter: (a, b) => (num(a.totalTokens) ?? -1) - (num(b.totalTokens) ?? -1) },
-            { title: '输入', align: 'right' as const, responsive: ['md' as const], render: (_v, r) => <TokenCell value={r.inputTokens} /> },
-            { title: '输出', align: 'right' as const, responsive: ['md' as const], render: (_v, r) => <TokenCell value={r.outputTokens} /> },
-            { title: '缓存写入', align: 'right' as const, responsive: ['md' as const], render: (_v, r) => <TokenCell value={r.cacheCreationTokens} /> },
-            { title: '缓存读取', align: 'right' as const, responsive: ['md' as const], render: (_v, r) => <TokenCell value={r.cacheReadTokens} /> },
             { title: '估算费用', align: 'right' as const, render: (_v, r) => <CostCell value={r.costUsd} />, sorter: (a, b) => (a.costUsd ?? -1) - (b.costUsd ?? -1) },
+            ...(showLeaders && !isMobile ? [
+              { title: <span title={`截至${anchorHint}的 7 天内，用量最多的 3 个用户`}>近 7 天用量最多</span>, width: 210, render: (_v: unknown, r: UsageRow) => <Leaders list={r.top7} /> },
+              { title: <span title={`${anchorHint}当天用量最多的 3 个用户`}>近 1 天用量最多</span>, width: 210, render: (_v: unknown, r: UsageRow) => <Leaders list={r.top1} /> },
+            ] : []),
           ]}
         />
       </Card>

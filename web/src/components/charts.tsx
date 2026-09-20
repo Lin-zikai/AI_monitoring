@@ -17,7 +17,7 @@ const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
 // 实体 → 色槽：幸存的系列保持原色，筛选变化不会让它们换色；本次渲染里已不存在的系列交还色槽，
 // 这样新出现的系列总能拿到颜色（同一张图最多 8 个系列，色槽不会用尽），而不是永久落到“其他”的灰色上。
 const slotRegistry = new Map<string, Map<string, number>>();
-function colorsFor(namespace: string, keys: string[]): string[] {
+function colorsFor(namespace: string, keys: string[], palette: readonly string[] = SERIES_COLORS): string[] {
   let slots = slotRegistry.get(namespace);
   if (!slots) { slots = new Map(); slotRegistry.set(namespace, slots); }
   const present = new Set(keys);
@@ -27,13 +27,18 @@ function colorsFor(namespace: string, keys: string[]): string[] {
     let slot = slots.get(key);
     if (slot === undefined) {
       const used = new Set(slots.values());
-      slot = SERIES_COLORS.findIndex((_, i) => !used.has(i));
-      if (slot < 0) return OTHER_COLOR; // 调用方保证不超过 8 个系列，这里只是兜底
+      slot = palette.findIndex((_, i) => !used.has(i));
+      if (slot < 0) return OTHER_COLOR; // 调用方保证系列数不超过色板长度，这里只是兜底
       slots.set(key, slot);
     }
-    return SERIES_COLORS[slot]!;
+    return palette[slot] ?? OTHER_COLOR;
   });
 }
+
+/** 色板里从第 start 个开始的 count 个颜色：并排的几张图各用一段，整体不重色（如 Claude Code 用前两个、Codex 用后两个） */
+export const paletteSlice = (start: number, count: number): string[] => SERIES_COLORS.slice(start, start + count);
+/** 同一色板换个起点：并排的图各自的头几个系列不撞色 */
+export const paletteFrom = (start: number): string[] => [...SERIES_COLORS.slice(start), ...SERIES_COLORS.slice(0, start)];
 
 export type ChartMetric = 'tokens' | 'cost';
 const fmtValue = (metric: ChartMetric, v: number) => (metric === 'cost' ? fmtCost(v) : `${fmtFull(v)} Token`);
@@ -58,9 +63,14 @@ const baseAxisStyle = {
 
 export interface TrendPoint { date: string; seriesKey: string; seriesLabel: string; value: number | null }
 
-/** 按日堆叠柱状图（按模型 / 服务器等维度堆叠）。没有记录的日期按 0 处理；值为未知（null）的点留空。 */
-export function StackedTrendChart({ points, from, to, metric, namespace, height = 340 }: {
+/**
+ * 按日堆叠柱状图（按模型 / 服务器等维度堆叠）。没有记录的日期按 0 处理；值为未知（null）的点留空。
+ * topN：只画用量最多的 N 个系列，其余的不画、也不折叠成“其他”（tooltip 里的合计仍是全部系列之和）；
+ * 不给 topN 时超过 8 个系列才把尾部折叠为“其他”。palette：这张图可用的颜色（默认整个分类色板）。
+ */
+export function StackedTrendChart({ points, from, to, metric, namespace, height = 340, topN, palette, emptyText = '所选范围内没有用量记录', ariaLabel = '按日用量趋势' }: {
   points: TrendPoint[]; from: string; to: string; metric: ChartMetric; namespace: string; height?: number;
+  topN?: number; palette?: readonly string[]; emptyText?: string; ariaLabel?: string;
 }) {
   // 手机：图矮一些；图例移到底部并可左右翻页（不挤占绘图区上方）；边距收紧；tooltip 限制在图表容器内
   const isMobile = useIsMobile();
@@ -74,13 +84,18 @@ export function StackedTrendChart({ points, from, to, metric, namespace, height 
       totals.set(p.seriesKey, t);
     }
     const ranked = [...totals.entries()].sort((a, b) => b[1].total - a[1].total);
-    const keep = ranked.length > 8 ? ranked.slice(0, 7) : ranked;
+    const colors = palette ?? SERIES_COLORS;
+    const keep = topN ? ranked.slice(0, Math.min(topN, colors.length)) : ranked.length > colors.length ? ranked.slice(0, colors.length - 1) : ranked;
     const keepKeys = new Set(keep.map(([k]) => k));
     const seriesDefs = keep.map(([key, v]) => ({ key, label: v.label }));
-    if (ranked.length > keep.length) seriesDefs.push({ key: OTHER_KEY, label: '其他' });
+    if (!topN && ranked.length > keep.length) seriesDefs.push({ key: OTHER_KEY, label: '其他' });
 
+    // 每天全部系列的合计：只画前 N 个时，tooltip 里仍给出当天的真实总量
+    const dayTotals = new Map<string, number>();
     const grid = new Map<string, Map<string, number | null>>();
     for (const p of points) {
+      dayTotals.set(p.date, (dayTotals.get(p.date) ?? 0) + (p.value ?? 0));
+      if (topN && !keepKeys.has(p.seriesKey)) continue;
       const key = keepKeys.has(p.seriesKey) ? p.seriesKey : OTHER_KEY;
       const row = grid.get(key) ?? new Map<string, number | null>();
       const prev = row.get(p.date);
@@ -90,7 +105,7 @@ export function StackedTrendChart({ points, from, to, metric, namespace, height 
 
     return {
       textStyle: { fontFamily: FONT },
-      color: colorsFor(namespace, seriesDefs.map((s) => s.key)),
+      color: colorsFor(namespace, seriesDefs.map((s) => s.key), colors),
       // 单系列不需要图例，标题已说明内容
       legend: seriesDefs.length > 1
         ? (isMobile
@@ -101,34 +116,35 @@ export function StackedTrendChart({ points, from, to, metric, namespace, height 
         ? { left: 4, right: 8, top: 12, bottom: seriesDefs.length > 1 ? 32 : 4, containLabel: true }
         : { left: 8, right: 16, top: seriesDefs.length > 1 ? 40 : 16, bottom: 8, containLabel: true },
       tooltip: {
+        confine: true, // 并排的小图：tooltip 留在图表容器里，不盖到旁边的图或被卡片裁掉
         ...(isMobile ? MOBILE_TOOLTIP : {}),
         trigger: 'axis', axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(11,11,11,0.04)' } },
         backgroundColor: '#fff', borderColor: 'rgba(11,11,11,0.10)', textStyle: { color: INK.primary, fontFamily: FONT, fontSize: 12 },
         formatter: (params: unknown) => {
-          const items = (params as Array<{ axisValueLabel: string; seriesName: string; value: number | string; color: string }>);
+          const items = (params as Array<{ axisValue: string; axisValueLabel: string; seriesName: string; value: number | string; color: string }>);
           if (!items.length) return '';
           const present = items.filter((i) => typeof i.value === 'number' && i.value > 0).sort((a, b) => Number(b.value) - Number(a.value));
-          const total = present.reduce((acc, i) => acc + Number(i.value), 0);
+          const total = topN ? (dayTotals.get(items[0]!.axisValue) ?? 0) : present.reduce((acc, i) => acc + Number(i.value), 0);
           const rows = present.map((i) =>
             `<div style="display:flex;justify-content:space-between;gap:24px"><span><span style="display:inline-block;width:10px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px;background:${i.color}"></span><span style="color:${INK.secondary}">${escapeHtml(i.seriesName)}</span></span><b style="white-space:nowrap">${fmtValue(metric, Number(i.value))}</b></div>`);
           return `<div style="margin-bottom:4px;color:${INK.secondary}">${escapeHtml(items[0]!.axisValueLabel)}</div>`
-            + `<div style="display:flex;justify-content:space-between;gap:24px;margin-bottom:4px"><span>合计${metric === 'cost' ? '（估算）' : ''}</span><b style="white-space:nowrap">${fmtValue(metric, total)}</b></div>${rows.join('')}`;
+            + `<div style="display:flex;justify-content:space-between;gap:24px;margin-bottom:4px"><span>${topN ? '当日合计' : '合计'}${metric === 'cost' ? '（估算）' : ''}</span><b style="white-space:nowrap">${fmtValue(metric, total)}</b></div>${rows.join('')}`;
         },
       },
-      xAxis: { type: 'category', data: dates, ...baseAxisStyle, splitLine: { show: false }, axisLabel: { ...baseAxisStyle.axisLabel, ...(isMobile ? { fontSize: 10, hideOverlap: true, interval: 'auto' } : {}), formatter: (d: string) => d.slice(5) } },
+      xAxis: { type: 'category', data: dates, ...baseAxisStyle, splitLine: { show: false }, axisLabel: { ...baseAxisStyle.axisLabel, ...(isMobile ? { fontSize: 10, hideOverlap: true, interval: 'auto' } : {}), ...(dates.length <= 10 ? { interval: 0 } : {}), formatter: (d: string) => d.slice(5) } },
       yAxis: { type: 'value', ...baseAxisStyle, ...(isMobile ? { splitNumber: 4 } : {}), axisLine: { show: false }, axisLabel: { ...baseAxisStyle.axisLabel, ...(isMobile ? { fontSize: 10 } : {}), formatter: axisFmt(metric) } },
       series: seriesDefs.map((s) => ({
-        name: s.label, type: 'bar', stack: 'total', barMaxWidth: 24,
+        name: s.label, type: 'bar', stack: 'total', barMaxWidth: dates.length <= 10 ? 40 : 24,
         // 用底面色描边形成堆叠段之间的 2px 间隙
         itemStyle: { borderColor: INK.surface, borderWidth: 1 },
         emphasis: { focus: 'series' },
         data: dates.map((d) => { const v = grid.get(s.key)?.get(d); return v === null ? '-' : (v ?? 0); }),
       })),
     };
-  }, [points, from, to, metric, namespace, isMobile]);
+  }, [points, from, to, metric, namespace, isMobile, topN, palette]);
 
-  if (!option) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="所选范围内没有用量记录" style={{ padding: '48px 0' }} />;
-  return <EChart option={option} height={isMobile ? Math.min(height, 260) : height} ariaLabel="按日用量趋势" />;
+  if (!option) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={emptyText} style={{ padding: '48px 0' }} />;
+  return <EChart option={option} height={isMobile ? Math.min(height, 260) : height} ariaLabel={ariaLabel} />;
 }
 
 export interface RankItem { key: string; label: string; value: number | null }

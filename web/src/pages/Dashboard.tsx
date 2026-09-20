@@ -1,14 +1,15 @@
-import { Alert, Button, Card, Col, DatePicker, Row, Segmented, Select, Space, Table, Tag, Typography } from 'antd';
+import { Alert, Button, Card, Col, DatePicker, Row, Segmented, Space, Table, Tag, Typography } from 'antd';
 import dayjs from 'dayjs';
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { AccountLimitsCard } from '../components/AccountLimits';
-import { RankBarChart, StackedTrendChart, type ChartMetric } from '../components/charts';
+import { RankBarChart, type ChartMetric } from '../components/charts';
 import { BudgetBar, CostCell, FilterBar, PageTitle, StatCard, TokenCell } from '../components/common';
+import { ModelTrendCard } from '../components/ModelTrendCard';
 import { fmtCost, fmtFull, fmtTime, fmtTokens, num } from '../format';
 import { useFetch } from '../hooks';
-import { DAYS_OPTIONS, METRIC_OPTIONS } from '../options';
+import { METRIC_OPTIONS } from '../options';
 import { useIsMobile } from '../responsive';
 import type { ColumnsType } from 'antd/es/table';
 import type { DailyRanking, DailyRankRow, Overview } from '../types';
@@ -26,10 +27,9 @@ const SourceCost = ({ value, tokens }: { value: number | null; tokens: TodayRow[
 
 export function DashboardPage() {
   const [rankBy, setRankBy] = useState<RankBy>('total');
-  const [days, setDays] = useState(30);
   const [metric, setMetric] = useState<ChartMetric>('tokens');
   const isMobile = useIsMobile();
-  const { data, loading, error } = useFetch(() => api.get<Overview>('/stats/overview', { days }), [days], { keepPrevious: true });
+  const { data, loading, error } = useFetch(() => api.get<Overview>('/stats/overview'), []);
 
   // 排名卡片自带日期选择：默认今天（统计时区），可回看任意一天
   const [rankDate, setRankDate] = useState<string | undefined>(undefined);
@@ -49,9 +49,6 @@ export function DashboardPage() {
     return { claudeTokens: add('claudeTokens'), claudeCost: add('claudeCost'), codexTokens: add('codexTokens'), codexCost: add('codexCost'), totalTokens: add('totalTokens'), totalCost: add('totalCost') };
   }, [todayAll]);
 
-  const trendPoints = useMemo(() => (data?.trend.rows ?? []).map((r) => ({
-    date: r.date, seriesKey: r.model, seriesLabel: r.model, value: metric === 'cost' ? r.costUsd : num(r.totalTokens),
-  })), [data, metric]);
   const modelItems = useMemo(() => (data?.models ?? []).map((m) => ({ key: m.model, label: m.model, value: metric === 'cost' ? m.costUsd : num(m.totalTokens) })), [data, metric]);
 
   const t = data?.totals;
@@ -103,8 +100,7 @@ export function DashboardPage() {
         title="总览仪表盘"
         extra={(
           <FilterBar items={[
-            { key: 'days', half: true, node: <Select value={days} onChange={setDays} options={DAYS_OPTIONS} style={{ width: 110 }} /> },
-            { key: 'metric', half: true, node: <Segmented value={metric} onChange={(v) => setMetric(v as ChartMetric)} options={METRIC_OPTIONS} /> },
+            { key: 'metric', node: <Segmented value={metric} onChange={(v) => setMetric(v as ChartMetric)} options={METRIC_OPTIONS} /> },
           ]} />
         )}
       />
@@ -120,11 +116,7 @@ export function DashboardPage() {
       </Row>
 
       <Row gutter={gutter} style={{ marginTop: gap }}>
-        <Col xs={24} xl={16}>
-          <Card title={`用量趋势 · 按模型堆叠（${metric === 'cost' ? '估算费用' : 'Token'}）`} size="small">
-            {data && <StackedTrendChart points={trendPoints} from={data.trend.from} to={data.trend.to} metric={metric} namespace="model" />}
-          </Card>
-        </Col>
+        <Col xs={24} xl={16}><ModelTrendCard metric={metric} /></Col>
         <Col xs={24} xl={8}>
           <Card title={`本月模型分布（${metric === 'cost' ? '估算费用' : 'Token'}）`} size="small">
             <RankBarChart items={modelItems} metric={metric} />

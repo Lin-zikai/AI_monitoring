@@ -38,8 +38,11 @@ export interface Measures {
   costUsd: number | null;
 }
 
-export interface UsageRow extends Measures { key0: string; label0: string; key1?: string; label1?: string; flagged: boolean }
-export interface UsageResponse { from: string; to: string; groupBy: Dimension[]; rows: UsageRow[] }
+/** 用量最多的用户（明细每行最多 3 个）：top7 = 截至该行日期的近 7 天，top1 = 当天；不按日期分组时以查询范围的最后一天为准 */
+export interface UsageLeader { userId: string; name: string; tokens: NumLike }
+export interface UsageRow extends Measures { key0: string; label0: string; key1?: string; label1?: string; flagged: boolean; top7?: UsageLeader[]; top1?: UsageLeader[] }
+/** leaders：这次结果是否带 top7 / top1（仅管理员，且没有限定或按用户分组时） */
+export interface UsageResponse { from: string; to: string; groupBy: Dimension[]; leaders?: boolean; rows: UsageRow[] }
 
 export interface Totals { todayTokens: NumLike; todayCost: number | null; monthTokens: NumLike; monthCost: number | null; activeUsersToday?: number; activeUsersMonth?: number }
 
@@ -48,11 +51,16 @@ export interface Issue {
   lastErrorCode?: string | null; lastError?: string | null; lastSuccessAt: string | null; consecutiveFailures?: number;
 }
 
+/** 仪表盘的用量趋势：按数据源 × 模型的每日用量。days=7 时 offset 表示往前翻了几周 */
+export interface ModelTrend {
+  from: string; to: string; today: string; earliest: string; days: number; offset: number;
+  rows: Array<{ date: string; source: string; model: string; totalTokens: NumLike; costUsd: number | null }>;
+}
+
 export interface Overview {
   freshness: Meta;
   month: string;
   totals: Totals;
-  trend: { from: string; to: string; rows: Array<{ date: string; model: string; totalTokens: NumLike; costUsd: number | null }> };
   models: Array<{ model: string; totalTokens: NumLike; costUsd: number | null }>;
   ranking: Array<{ userId: string; name: string; team: string | null; monthlyBudgetUsd: number | null; monthTokens: NumLike; monthCost: number | null; todayTokens: NumLike }>;
   issues: Issue[];

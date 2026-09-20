@@ -158,32 +158,89 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
       [from, to, userId, q.serverId ?? null, q.model ?? null, q.team ?? null, q.source ?? null],
     );
     if (res.rows.length > MAX_USAGE_ROWS) throw new HttpError(400, `结果超过 ${MAX_USAGE_ROWS} 行，请缩小日期范围或减少分组维度`, 'TOO_MANY_ROWS');
-    return { from, to, groupBy: dims, rows: res.rows };
+
+    // 每行附带“用量最多的 3 个用户”：近 7 天（截至该行日期；不按日期分组时截至范围末尾）与当天各一份。
+    // 只对管理员、且没有限定到单个用户 / 没有按用户分组时才有意义
+    const withLeaders = currentUser(req).role === 'admin' && !userId && !dims.includes('user');
+    if (withLeaders && res.rows.length > 0) {
+      const others = dims.filter((d) => d !== 'date');
+      const otherSelects = others.map((d, i) => `, ${DIMENSIONS[d].select} AS o${i}`).join('');
+      const otherCols = others.map((_, i) => `, o${i}`).join('');
+      const leaders = await db.query(
+        `WITH anchors AS (${dims.includes('date') ? "SELECT g::date AS anchor FROM generate_series($1::date, $2::date, interval '1 day') g" : 'SELECT $2::date AS anchor WHERE $1::date IS NOT NULL'}),
+              per AS (
+                SELECT a.anchor${otherSelects}, d.user_id, min(u.name) AS name,
+                       sum(d.total_tokens) AS t7, sum(d.total_tokens) FILTER (WHERE d.usage_date = a.anchor) AS t1
+                  FROM anchors a JOIN usage_daily d ON d.usage_date BETWEEN a.anchor - 6 AND a.anchor
+                  JOIN users u ON u.id = d.user_id JOIN servers s ON s.id = d.server_id
+                 WHERE ($3::uuid IS NULL OR d.server_id = $3) AND ($4::text IS NULL OR d.model = $4) AND ($5::text IS NULL OR u.team = $5) AND ($6::text IS NULL OR d.source = $6)
+                 GROUP BY a.anchor${otherCols}, d.user_id),
+              ranked AS (
+                SELECT *, row_number() OVER (PARTITION BY anchor${otherCols} ORDER BY t7 DESC NULLS LAST, name) AS r7,
+                          row_number() OVER (PARTITION BY anchor${otherCols} ORDER BY t1 DESC NULLS LAST, name) AS r1 FROM per)
+         SELECT anchor::text AS anchor${otherCols}, user_id AS "userId", name, t7::bigint AS t7, t1::bigint AS t1, r7::int AS r7, r1::int AS r1
+           FROM ranked WHERE (r7 <= 3 AND t7 > 0) OR (r1 <= 3 AND t1 > 0)`,
+        [from, to, q.serverId ?? null, q.model ?? null, q.team ?? null, q.source ?? null],
+      );
+      type Ranked = { userId: string; name: string; tokens: number; r: number };
+      const byRow = new Map<string, { top7: Ranked[]; top1: Ranked[] }>();
+      for (const l of leaders.rows) {
+        let o = 0;
+        const key = dims.map((d) => (d === 'date' ? l.anchor : l[`o${o++}`])).join('\u0000');
+        const entry = byRow.get(key) ?? { top7: [], top1: [] };
+        if (l.r7 <= 3 && l.t7 > 0) entry.top7.push({ userId: l.userId, name: l.name, tokens: l.t7, r: l.r7 });
+        if (l.r1 <= 3 && l.t1 > 0) entry.top1.push({ userId: l.userId, name: l.name, tokens: l.t1, r: l.r1 });
+        byRow.set(key, entry);
+      }
+      const clean = (list: Ranked[] | undefined) => (list ?? []).sort((a, b) => a.r - b.r).map(({ r: _r, ...rest }) => rest);
+      for (const row of res.rows) {
+        const entry = byRow.get(dims.map((_, i) => row[`key${i}`]).join('\u0000'));
+        row.top7 = clean(entry?.top7);
+        row.top1 = clean(entry?.top1);
+      }
+    }
+    return { from, to, groupBy: dims, leaders: withLeaders, rows: res.rows };
+  });
+
+  /**
+   * 仪表盘的用量趋势：按数据源 × 模型给出每天的用量。days=7 时可用 offset 往前翻周（每次 7 天），30 / 90 天总是截至今天。
+   * 只返回有用量的行，缺的日期由前端按 0 补齐。
+   */
+  app.get('/stats/model-trend', auth, async (req) => {
+    const q = parse(z.object({ days: z.coerce.number().int().refine((v) => [7, 30, 90].includes(v), '只支持 7 / 30 / 90 天').default(7), offset: z.coerce.number().int().min(0).max(520).default(0) }), req.query);
+    const userId = scopedUserId(req);
+    const settings = await getGeneralSettings(db);
+    const today = dateInTz(new Date(), settings.timezone);
+    const offset = q.days === 7 ? q.offset : 0;
+    const to = addDays(today, -7 * offset);
+    const from = addDays(to, -(q.days - 1));
+    const [rows, first] = await Promise.all([
+      db.query(
+        `SELECT d.usage_date::text AS date, d.source, d.model, sum(d.total_tokens)::bigint AS "totalTokens", sum(d.cost_usd)::float8 AS "costUsd"
+           FROM usage_daily d WHERE ($1::uuid IS NULL OR d.user_id = $1) AND d.usage_date BETWEEN $2 AND $3 GROUP BY 1, 2, 3 ORDER BY 1`,
+        [userId, from, to],
+      ),
+      db.query('SELECT min(usage_date)::text AS d FROM usage_daily WHERE ($1::uuid IS NULL OR user_id = $1)', [userId]),
+    ]);
+    return { from, to, today, earliest: (first.rows[0].d as string | null) ?? today, days: q.days, offset, rows: rows.rows };
   });
 
   app.get('/stats/overview', auth, async (req) => {
-    const q = parse(z.object({ days: z.coerce.number().int().min(7).max(180).default(30) }), req.query);
     const me = currentUser(req);
     const userId = scopedUserId(req);
     const settings = await getGeneralSettings(db);
     const now = new Date();
     const today = dateInTz(now, settings.timezone);
     const month = monthRange(monthKey(today));
-    const trendFrom = addDays(today, -(q.days - 1));
     const scope = '($1::uuid IS NULL OR d.user_id = $1)';
 
-    const [totals, trend, models, ranking, issues] = await Promise.all([
+    const [totals, models, ranking, issues] = await Promise.all([
       db.query(
         `SELECT ${sumOrZero('d.total_tokens', 'd.usage_date = $2')}::bigint AS "todayTokens", ${sumOrZero('d.cost_usd', 'd.usage_date = $2')}::float8 AS "todayCost",
                 ${sumOrZero('d.total_tokens')}::bigint AS "monthTokens", ${sumOrZero('d.cost_usd')}::float8 AS "monthCost",
                 count(DISTINCT d.user_id) FILTER (WHERE d.usage_date = $2)::int AS "activeUsersToday", count(DISTINCT d.user_id)::int AS "activeUsersMonth"
            FROM usage_daily d WHERE ${scope} AND d.usage_date BETWEEN $3 AND $4`,
         [userId, today, month.first, month.last],
-      ),
-      db.query(
-        `SELECT d.usage_date::text AS date, d.model, sum(d.total_tokens)::bigint AS "totalTokens", sum(d.cost_usd)::float8 AS "costUsd"
-           FROM usage_daily d WHERE ${scope} AND d.usage_date BETWEEN $2 AND $3 GROUP BY 1, 2 ORDER BY 1`,
-        [userId, trendFrom, today],
       ),
       db.query(
         `SELECT d.model, sum(d.total_tokens)::bigint AS "totalTokens", sum(d.cost_usd)::float8 AS "costUsd"
@@ -215,7 +272,6 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
       freshness: await freshness(userId, settings, now),
       month: monthKey(today),
       totals: totals.rows[0],
-      trend: { from: trendFrom, to: today, rows: trend.rows },
       models: models.rows,
       ranking: ranking.rows,
       // 普通用户只看到“我的来源有异常”，不暴露错误细节里的服务器信息
