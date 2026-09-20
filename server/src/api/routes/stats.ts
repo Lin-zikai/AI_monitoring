@@ -61,7 +61,7 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
   async function freshness(userId: string | null, settings: GeneralSettings, now: Date) {
     const row = (await db.query(
       `SELECT max(t.last_success_at) AS "lastSuccessAt", min(t.last_success_at) AS "oldestSuccessAt", count(*)::int AS targets,
-              count(*) FILTER (WHERE t.last_success_at IS NULL OR t.last_success_at < $2 OR t.last_status = 'failed')::int AS "staleTargets"
+              count(*) FILTER (WHERE t.last_status = 'failed' OR (t.last_error_code IS DISTINCT FROM 'NO_DATA_DIR' AND (t.last_success_at IS NULL OR t.last_success_at < $2)))::int AS "staleTargets"
          FROM collection_targets t JOIN servers s ON s.id = t.server_id
         WHERE t.enabled AND s.enabled AND ($1::uuid IS NULL OR t.user_id = $1)`,
       [userId, staleBefore(settings, now)],
@@ -105,7 +105,7 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
   app.get('/limits', { preHandler: ctx.requireAdmin }, async () => latestAccountLimits(db));
 
   app.post('/limits/refresh', { preHandler: ctx.requireAdmin, config: { rateLimit: { max: 6, timeWindow: '1 minute' } } }, async (req) => {
-    const outcomes = await refreshAccountLimits({ db, executor: ctx.executor, masterKey: ctx.config.masterKey, log: req.log as unknown as Logger, baseUrl: ctx.config.publicBaseUrl });
+    const outcomes = await refreshAccountLimits({ db, executor: ctx.executor, masterKey: ctx.config.masterKey, log: req.log as unknown as Logger, baseUrl: ctx.config.publicBaseUrl, force: true });
     await ctx.queues.kickMail();
     return { outcomes, ...(await latestAccountLimits(db)) };
   });
@@ -205,7 +205,7 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
                 t.last_error_code AS "lastErrorCode", t.last_error AS "lastError", t.last_success_at AS "lastSuccessAt", t.consecutive_failures AS "consecutiveFailures"
            FROM collection_targets t JOIN servers s ON s.id = t.server_id JOIN users u ON u.id = t.user_id
           WHERE t.enabled AND s.enabled AND ($1::uuid IS NULL OR t.user_id = $1)
-            AND (t.last_success_at IS NULL OR t.last_success_at < $2 OR t.last_status = 'failed')
+            AND (t.last_status = 'failed' OR (t.last_error_code IS DISTINCT FROM 'NO_DATA_DIR' AND (t.last_success_at IS NULL OR t.last_success_at < $2)))
           ORDER BY t.last_success_at NULLS FIRST LIMIT 50`,
         [userId, staleBefore(settings, now)],
       ),
@@ -260,7 +260,7 @@ export async function statsRoutes(app: FastifyInstance, ctx: RouteContext): Prom
       db.query(
         `SELECT t.id AS "targetId", s.id AS "serverId", s.name AS "serverName", t.source, t.data_dir AS "dataDir", t.shared_account AS "sharedAccount",
                 t.enabled AND s.enabled AS enabled, t.last_success_at AS "lastSuccessAt", t.last_status AS "lastStatus",
-                (t.enabled AND s.enabled AND (t.last_success_at IS NULL OR t.last_success_at < $4 OR t.last_status = 'failed')) AS stale,
+                (t.enabled AND s.enabled AND (t.last_status = 'failed' OR (t.last_error_code IS DISTINCT FROM 'NO_DATA_DIR' AND (t.last_success_at IS NULL OR t.last_success_at < $4)))) AS stale,
                 x."totalTokens", x."costUsd", COALESCE(x.flagged, false) AS flagged
            FROM collection_targets t JOIN servers s ON s.id = t.server_id
            LEFT JOIN LATERAL (

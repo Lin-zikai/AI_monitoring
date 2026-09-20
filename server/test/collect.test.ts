@@ -403,10 +403,10 @@ describe('账号额度', () => {
 
   it('识别不出账号的来源单独列出原因', async () => {
     await collect(db, fakeExecutor(() => report({ '2026-09-19': [opus(1, 1)] })), targetA, NOW);
-    const executor = { exec: async () => reply({ status: 'error', code: 'NO_LOGIN', message: '该目录下没有订阅账号的登录信息' }) };
+    const executor = { exec: async () => reply({ status: 'error', code: 'DIR_UNREADABLE', message: '没有读取该目录的权限' }) };
     await refreshAccountLimits({ db, executor, masterKey: (await import('./helpers.js')).masterKey, log: silentLog });
     const view = await latestAccountLimits(db);
-    expect(view).toMatchObject({ limits: [], hidden: [], checked: true, unidentified: [{ provider: 'claude-code', serverName: 'server-a', error: expect.stringContaining('NO_LOGIN') }] });
+    expect(view).toMatchObject({ limits: [], hidden: [], checked: true, unidentified: [{ provider: 'claude-code', serverName: 'server-a', error: expect.stringContaining('DIR_UNREADABLE') }] });
   });
 });
 

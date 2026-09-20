@@ -120,11 +120,10 @@ describe('采集脚本的行为', () => {
     expect((await runCollector(usageArgs(dataDir), config)).envelope).toMatchObject({ status: 'ok', report: { daily: [] } });
   });
 
-  it('数据目录之外的 ~/.claude.json 只有在白名单放行时才读（按解析符号链接后的真实路径判断）', async () => {
+  it('数据目录同级的 ~/.claude.json 随数据目录一起放行；符号链接指到别处时只有白名单放行了那里才读', async () => {
     const identity = (allowedDirs: string[], dir = dataDir) => runCollector(['--identity', 'claude-code', '--dir', dir], { allowedDirs }).then((r) => r.envelope);
     expect(await identity(['**'])).toMatchObject({ status: 'ok', accountKey: 'uuid-1', accountLabel: 'team@example.com' }); // 平台自动安装的配置
-    expect(await identity([join(work, 'home', '*', '.claude')])).toMatchObject({ status: 'error', code: 'NO_LOGIN', accountKey: null });
-    expect(await identity([join(work, 'home', '*', '.claude'), join(work, 'home', '*', '.claude.json')])).toMatchObject({ status: 'ok', accountKey: 'uuid-1' });
+    expect(await identity([join(work, 'home', '*', '.claude')])).toMatchObject({ status: 'ok', accountKey: 'uuid-1' }); // 手工部署：白名单里只有数据目录
 
     // 同级的 .claude.json 是指向别人文件的符号链接：白名单只放行了自己的那个路径，不跟过去读
     const other = join(work, 'home', 'lisi');

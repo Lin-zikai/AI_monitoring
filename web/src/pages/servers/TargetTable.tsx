@@ -62,7 +62,7 @@ function targetStatus(t: Target, withTooltip = true) {
     if (t.lastErrorCode === 'NO_DATA_DIR') return <Badge status="default" text="未使用" />;
   }
   if (t.lastStatus === 'failed') return <Tooltip title={t.lastError}><Badge status="error" text={`失败 ×${t.consecutiveFailures}${t.lastErrorCode ? ` · ${t.lastErrorCode}` : ''}`} /></Tooltip>;
-  if (t.lastErrorCode === 'NO_DATA_DIR') return <Tooltip title="远端还没有这个目录：该账户尚未使用此工具。不算采集失败；目录出现后会自动开始采集并回填历史。"><Badge status="default" text="未使用" /></Tooltip>;
+  if (t.lastErrorCode === 'NO_DATA_DIR') return <Tooltip title="远端还没有这个目录：该账户尚未使用此工具。不算采集失败，平时不再连接采集，每天探测一次；目录出现后自动开始采集并回填历史。"><Badge status="default" text="未使用" /></Tooltip>;
   if (!t.initializedAt) return <Badge status="warning" text="待初始化" />;
   return <Badge status="success" text="正常" />;
 }
@@ -71,7 +71,7 @@ function targetStatus(t: Target, withTooltip = true) {
 function statusDetail(t: Target): string | null {
   if (t.collecting || !t.enabled) return null;
   if (t.lastStatus === 'failed') return t.lastError;
-  if (t.lastErrorCode === 'NO_DATA_DIR') return '远端还没有这个目录：该账户尚未使用此工具。不算采集失败；目录出现后会自动开始采集并回填历史。';
+  if (t.lastErrorCode === 'NO_DATA_DIR') return '远端还没有这个目录：该账户尚未使用此工具。不算采集失败，平时不再连接采集，每天探测一次；目录出现后自动开始采集并回填历史。';
   return null;
 }
 

@@ -173,14 +173,14 @@ export async function evaluateUsageAlerts(tx: Tx, input: EvaluateInput): Promise
   return created;
 }
 
-/** 用户名下尚未按期更新的来源：超过两个采集周期没有成功，或最近一次失败。 */
+/** 用户名下尚未按期更新的来源：超过两个采集周期没有成功，或最近一次失败。远端没装该工具（NO_DATA_DIR）的目标每天只探测一次，不算过期。 */
 export async function findIncompleteSources(tx: Tx, userId: string, now: Date, intervalHours: number): Promise<IncompleteSource[]> {
   const staleBefore = new Date(now.getTime() - 2 * intervalHours * 3_600_000);
   const res = await tx.query(
     `SELECT s.name AS server, t.data_dir, t.last_success_at
        FROM collection_targets t JOIN servers s ON s.id = t.server_id
       WHERE t.user_id = $1 AND t.enabled AND s.enabled
-        AND (t.last_success_at IS NULL OR t.last_success_at < $2 OR t.last_status = 'failed')
+        AND (t.last_status = 'failed' OR (t.last_error_code IS DISTINCT FROM 'NO_DATA_DIR' AND (t.last_success_at IS NULL OR t.last_success_at < $2)))
       ORDER BY s.name, t.data_dir`,
     [userId, staleBefore],
   );

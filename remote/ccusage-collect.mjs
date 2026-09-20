@@ -28,7 +28,7 @@ import { accessSync, constants, readFileSync, readdirSync, realpathSync, statSyn
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const COLLECTOR_VERSION = '1.8.0';
+const COLLECTOR_VERSION = '1.8.1';
 const CONFIG_PATH = process.env.CCUSAGE_COLLECT_CONFIG || '/etc/ccusage-collect/config.json';
 const SAFE_PATH = /^\/[A-Za-z0-9._@+\-/]*$/;
 // requireLogRoot：Claude 没有 projects/ 时 ccusage 会报错，视为“确实没有用量”；Codex 的记录位置随版本变化（sessions/ 或 sqlite），交给 ccusage 判断
@@ -197,12 +197,14 @@ const pct = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Ma
 const IDENTITY = {
   'claude-code'(realDir, allowedDirs) {
     // Claude Code 把账号信息放在与 .claude 同级的 ~/.claude.json；设置了 CLAUDE_CONFIG_DIR 时则在目录内。
-    // 同级的那份在数据目录之外：只有白名单放行了它所在的目录（自动安装时为 "**"），或把文件本身写进白名单
-    // （如 "/home/*/.claude.json"）时才读；按解析符号链接后的真实路径判断。
+    // 同级的那份在数据目录之外：放行了数据目录就视为放行它同级的这个固定文件名（只取账号 ID 与邮箱两个字段），
+    // 已有的手工部署不必改白名单；但按解析符号链接后的真实路径判断——它必须真的就在数据目录旁边，
+    // 指到别处的符号链接只有白名单另外放行了那个位置才读。
     for (const file of [join(dirname(realDir), '.claude.json'), join(realDir, '.claude.json')]) {
       try {
         const real = realpathSync(file);
-        if (!dirAllowed(dirname(real), allowedDirs) && !dirAllowed(real, allowedDirs)) continue;
+        const besideDataDir = dirname(real) === dirname(realDir) || dirname(real) === realDir;
+        if (!besideDataDir && !dirAllowed(dirname(real), allowedDirs) && !dirAllowed(real, allowedDirs)) continue;
         const a = JSON.parse(readFileSync(real, 'utf8')).oauthAccount;
         if (a?.accountUuid) return { accountKey: String(a.accountUuid), accountLabel: a.emailAddress ? String(a.emailAddress) : null };
       } catch { /* 换下一个位置 */ }

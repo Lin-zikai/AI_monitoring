@@ -41,7 +41,17 @@ export interface LimitsDeps {
   now?: () => Date;
   /** 一轮刷新的总时限（默认 8 分钟，小于 10 分钟的调度间隔）：到点后不再发起新的远程调用，剩下的留给下一轮 */
   deadlineMs?: number;
+  /** 管理员点“立即查询”：忽略下面两种退避，全部重新查一遍 */
+  force?: boolean;
 }
+
+// 没在用的就不去查：定时刷新每 10 分钟一轮，对“这台机器上根本没登录订阅账号”“登录早已过期”的目标反复 SSH、反复请求服务商没有意义。
+// 没登录 / 没装（身份查询返回这些代码）的目标每 6 小时才再探测一次；登录已失效的账号每小时才再查一次。
+// 重新登录后最迟一个周期自动恢复显示，也可以点“立即查询”马上刷新。
+const NOT_IN_USE_CODES = ['NO_LOGIN', 'DIR_MISSING'];
+const NOT_IN_USE_RECHECK_MS = 6 * 3_600_000;
+const DEAD_ACCOUNT_RECHECK_MS = 3_600_000;
+const notInUse = (accountError: string | null | undefined) => NOT_IN_USE_CODES.some((code) => accountError?.startsWith(`${code}:`));
 
 export function buildAccountCommand(collectCommand: string, mode: 'limits' | 'identity', provider: string, dir: string): string {
   if (!isValidCollectCommand(collectCommand) || !supportedSources().includes(provider) || !isSafeAbsolutePath(dir)) throw new CollectError('BAD_ARGS', '额度查询参数不合法');
@@ -99,6 +109,8 @@ interface Candidate {
   target_id: string; server_id: string; server_name: string; data_dir: string; collect_command: string; install_mode: InstallMode;
   /** 采集命令由平台自动安装、且这个目标用的就是服务器登记的 SSH 账户：只有这种情况平台才会自动升级远端脚本 */
   upgradable: boolean;
+  /** 上次身份查询发现这里没登录订阅账号 / 没装：那次查询的时间；否则为 null */
+  idleSince: Date | null;
   ssh: SshTarget; accountKey?: string; accountLabel?: string | null;
 }
 
@@ -107,7 +119,7 @@ async function candidates(deps: LimitsDeps, provider: string): Promise<Candidate
   const res = await deps.db.query(
     `SELECT t.id AS target_id, s.id AS server_id, s.name AS server_name, t.data_dir, s.collect_command, s.install_mode, s.host, s.port, s.host_key_fingerprint,
             COALESCE(t.ssh_username, s.ssh_username) AS username, (t.ssh_username IS NULL OR t.ssh_username = s.ssh_username) AS server_account,
-            c.id AS credential_id, c.ciphertext, c.iv, c.auth_tag,
+            c.id AS credential_id, c.ciphertext, c.iv, c.auth_tag, t.account_error, t.account_checked_at,
             (SELECT COALESCE(sum(d.total_tokens), 0) FROM usage_daily d WHERE d.target_id = t.id AND d.usage_date >= current_date - 2) AS recent
        FROM collection_targets t JOIN servers s ON s.id = t.server_id
        JOIN credentials c ON c.id = COALESCE(t.credential_id, s.credential_id)
@@ -124,6 +136,7 @@ async function candidates(deps: LimitsDeps, provider: string): Promise<Candidate
       out.push({
         target_id: r.target_id, server_id: r.server_id, server_name: r.server_name, data_dir: r.data_dir, collect_command: r.collect_command, install_mode: r.install_mode,
         upgradable: isManagedCommand(r.collect_command) && r.server_account,
+        idleSince: notInUse(r.account_error) ? r.account_checked_at : null,
         ssh: { host: r.host, port: r.port, username: r.username, privateKey: secret.privateKey, passphrase: secret.passphrase, expectedHostFingerprint: r.host_key_fingerprint },
       });
     } catch (err) {
@@ -262,7 +275,9 @@ export async function refreshAccountLimits(deps: LimitsDeps): Promise<LimitsOutc
       return [] as Candidate[];
     });
     run.candidates = all;
+    const nowMs = (deps.now?.() ?? new Date()).getTime();
     await inBatches(all, 4, async (c) => {
+      if (!deps.force && c.idleSince && nowMs - c.idleSince.getTime() < NOT_IN_USE_RECHECK_MS) return; // 没在用：保持原状，过几个小时再看
       try {
         const id = await askWithUpgrade(run, c, 'identity', provider);
         c.accountKey = id.accountKey ?? undefined;
@@ -287,7 +302,12 @@ export async function refreshAccountLimits(deps: LimitsDeps): Promise<LimitsOutc
     const groups = new Map<string, Candidate[]>();
     for (const c of all) if (c.accountKey) groups.set(c.accountKey, [...(groups.get(c.accountKey) ?? []), c]);
 
+    const lastSnapshots = deps.force ? [] : (await deps.db.query(
+      'SELECT DISTINCT ON (account_key) account_key, status, error_code, fetched_at FROM account_limit_snapshots WHERE provider = $1 ORDER BY account_key, fetched_at DESC', [provider],
+    )).rows;
     for (const [accountKey, members] of groups) {
+      const last = lastSnapshots.find((r) => r.account_key === accountKey);
+      if (last?.status === 'error' && DEAD_CODES.has(last.error_code) && nowMs - last.fetched_at.getTime() < DEAD_ACCOUNT_RECHECK_MS) continue; // 登录已失效：一小时内不重复查
       const label = members.find((m) => m.accountLabel)?.accountLabel ?? null;
       // 全部失败时记哪个错误：优先“还活着”的（网络抖动、服务商接口异常）。否则最后一台恰好令牌过期，就会把整个账号藏进“登录已过期”
       let worst: { code: string; message: string; c: Candidate } | undefined;
@@ -355,7 +375,7 @@ export async function latestAccountLimits(db: Db): Promise<{ limits: LimitsView[
     `SELECT t.source AS provider, s.name AS "serverName", t.data_dir AS "dataDir", t.account_error AS error
        FROM collection_targets t JOIN servers s ON s.id = t.server_id
       WHERE ${active} AND t.account_key IS NULL AND t.account_error IS NOT NULL ORDER BY t.source, s.name`,
-  )).rows;
+  )).rows.filter((r) => !notInUse(r.error)); // 没登录订阅账号 / 没装的机器不是故障，不用提示
   const checked = (await db.query('SELECT 1 FROM collection_targets WHERE account_checked_at IS NOT NULL LIMIT 1')).rowCount !== 0;
   const all = accounts.map((a) => {
     const ok = snaps.find((r) => r.provider === a.provider && r.account_key === a.account_key && r.status === 'ok');

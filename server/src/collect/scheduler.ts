@@ -6,14 +6,19 @@ export interface CreatedBatch { batchId: string; kind: string; runIds: string[] 
 
 const ON_TIME_WINDOW_MS = 10 * 60_000;
 
-async function createRuns(tx: Tx, batchId: string, trigger: string, targetIds?: string[]): Promise<string[]> {
+/**
+ * skipUninstalled：远端没装该工具的目标（上次采集发现数据目录不存在，NO_DATA_DIR）不参加常规时点的采集，
+ * 只在每天的对账批次里探测一次——之后装上了，最迟第二天自动开始统计；手动“立即采集”不受影响。
+ */
+async function createRuns(tx: Tx, batchId: string, trigger: string, opts: { targetIds?: string[]; skipUninstalled?: boolean } = {}): Promise<string[]> {
   const res = await tx.query(
     `INSERT INTO collection_runs (batch_id, target_id, trigger)
      SELECT $1, t.id, CASE WHEN t.initialized_at IS NULL THEN 'init' ELSE $2 END
        FROM collection_targets t JOIN servers s ON s.id = t.server_id
       WHERE t.enabled AND s.enabled AND ($3::uuid[] IS NULL OR t.id = ANY($3::uuid[]))
+        AND NOT ($4 AND t.last_status = 'success' AND t.last_error_code IS NOT DISTINCT FROM 'NO_DATA_DIR')
      RETURNING id`,
-    [batchId, trigger, targetIds ?? null],
+    [batchId, trigger, opts.targetIds ?? null, opts.skipUninstalled ?? false],
   );
   await tx.query('UPDATE collection_batches SET target_count = $2 WHERE id = $1', [batchId, res.rowCount]);
   return res.rows.map((r) => r.id);
@@ -33,14 +38,15 @@ export async function ensureSlotBatch(db: Db, now = new Date()): Promise<Created
   return withTx(db, async (tx) => {
     // 每个自然日的首个批次做一次较长范围的对账，补齐延迟写入的记录
     const reconciled = await tx.query('SELECT 1 FROM collection_batches WHERE reconcile AND scheduled_slot >= $1 LIMIT 1', [dayStart]);
+    const reconcile = reconciled.rowCount === 0;
     const batch = await tx.query(
       `INSERT INTO collection_batches (kind, scheduled_slot, reconcile) VALUES ($1, $2, $3)
        ON CONFLICT (scheduled_slot) DO NOTHING RETURNING id`,
-      [kind, slot, reconciled.rowCount === 0],
+      [kind, slot, reconcile],
     );
     const batchId = batch.rows[0]?.id as string | undefined;
     if (!batchId) return null;
-    return { batchId, kind, runIds: await createRuns(tx, batchId, kind) };
+    return { batchId, kind, runIds: await createRuns(tx, batchId, kind, { skipUninstalled: !reconcile }) };
   });
 }
 
@@ -49,7 +55,7 @@ export async function createAdhocBatch(db: Db, kind: 'manual' | 'init', targetId
   return withTx(db, async (tx) => {
     const batch = await tx.query('INSERT INTO collection_batches (kind, created_by) VALUES ($1, $2) RETURNING id', [kind, createdBy]);
     const batchId = batch.rows[0].id as string;
-    return { batchId, kind, runIds: await createRuns(tx, batchId, kind, targetIds) };
+    return { batchId, kind, runIds: await createRuns(tx, batchId, kind, { targetIds }) };
   });
 }
 

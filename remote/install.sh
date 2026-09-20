@@ -44,7 +44,7 @@ cat <<MSG
   3. （可选）账号额度查询（5 小时 / 每周额度）需要读取登录令牌文件，默认关闭（config.json 的 "allowAccountQueries": false）。
      关闭时平台只是不显示这台服务器上账号的额度，用量采集不受影响。确实需要时再单独授权并改为 true：
        setfacl -m u:${COLLECT_USER}:r /home/zhangsan/.claude/.credentials.json   # Codex 为 ~/.codex/auth.json
-       setfacl -m u:${COLLECT_USER}:r /home/zhangsan/.claude.json                # 识别登录的是哪个账号；并把 "/home/*/.claude.json" 加进 allowedDirs
+       setfacl -m u:${COLLECT_USER}:r /home/zhangsan/.claude.json                # 识别登录的是哪个账号
      注意：CLI 续期令牌时会重写该文件，单文件的 ACL 可能随之丢失；采集账户因此能读到该用户的登录令牌，请自行权衡。
   4. 在平台“服务器管理”中添加本机（SSH 用户名 ${COLLECT_USER}），扫描并核对主机指纹：
        ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
