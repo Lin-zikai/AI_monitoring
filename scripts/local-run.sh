@@ -28,6 +28,9 @@ start)
   [ -d "$ROOT/web/node_modules" ] || (cd "$ROOT/web" && npm ci)
   (cd "$ROOT/server" && npm run build >/dev/null)
   (cd "$ROOT/web" && npm run build >/dev/null)
+  # 采集脚本取启动时的快照：运行中的实例会把“随附脚本”自动推到远端服务器，不能让它读到工作区里改了一半的文件
+  mkdir -p "$RUN/remote" && cp "$ROOT/remote/ccusage-collect.mjs" "$RUN/remote/ccusage-collect.mjs"
+  export COLLECTOR_SCRIPT_PATH="$RUN/remote/ccusage-collect.mjs"
 
   launch postgres node "$ROOT/scripts/local-pg.mjs" "$RUN/pgdata" "$PG_PORT" "$PG_PASSWORD"
   wait_for postgres 'postgres ready'
