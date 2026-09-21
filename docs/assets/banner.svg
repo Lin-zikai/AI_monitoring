@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="440" viewBox="0 0 1280 440" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">AI Monitoring</title>
+  <desc id="desc">A self-hosted workspace for AI usage, limits and costs. Decorative illustration of sources flowing into a monitoring dashboard, not a product screenshot.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="440" gradientUnits="userSpaceOnUse"><stop stop-color="#0D1428"/><stop offset="1" stop-color="#152B42"/></linearGradient>
+    <linearGradient id="accent" x1="772" y1="280" x2="1158" y2="152" gradientUnits="userSpaceOnUse"><stop stop-color="#7C8FFF"/><stop offset="1" stop-color="#52E0C0"/></linearGradient>
+    <linearGradient id="area" x1="960" y1="190" x2="960" y2="324" gradientUnits="userSpaceOnUse"><stop stop-color="#52E0C0" stop-opacity=".23"/><stop offset="1" stop-color="#52E0C0" stop-opacity="0"/></linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" stroke="#AFC5EB" stroke-opacity=".035"/></pattern>
+  </defs>
+  <rect width="1280" height="440" rx="24" fill="url(#bg)"/>
+  <rect width="1280" height="440" rx="24" fill="url(#grid)"/>
+  <circle cx="1140" cy="30" r="240" fill="#4BC7B5" fill-opacity=".035"/>
+  <circle cx="1150" cy="30" r="180" stroke="#52E0C0" stroke-opacity=".07"/>
+  <g font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <rect x="58" y="56" width="42" height="42" rx="12" fill="#758AFF" fill-opacity=".16" stroke="#91A0FF" stroke-opacity=".35"/>
+    <path d="M69 83V76M79 83V67M89 83V72" stroke="#A5B1FF" stroke-width="4" stroke-linecap="round"/>
+    <text x="116" y="83" fill="#A8B8D4" font-size="14" font-weight="600" letter-spacing="3">YOUR TEAM. ONE VIEW.</text>
+    <text x="56" y="174" fill="#F2F6FF" font-size="58" font-weight="750" letter-spacing="-2">AI Monitoring</text>
+    <text x="60" y="224" fill="#BAC8DF" font-size="23">Know your usage.</text>
+    <text x="60" y="257" fill="#BAC8DF" font-size="23">Understand your costs.</text>
+    <rect x="60" y="299" width="126" height="32" rx="16" fill="#B7A6FF" fill-opacity=".1" stroke="#B7A6FF" stroke-opacity=".25"/>
+    <text x="123" y="320" text-anchor="middle" fill="#D2C5FF" font-size="13">Claude Code</text>
+    <rect x="196" y="299" width="87" height="32" rx="16" fill="#52E0C0" fill-opacity=".08" stroke="#52E0C0" stroke-opacity=".25"/>
+    <text x="239" y="320" text-anchor="middle" fill="#93ECD8" font-size="13">Codex</text>
+    <text x="60" y="387" fill="#7C91B2" font-size="12" letter-spacing="2">SELF-HOSTED / MULTI-SERVER / TEAM ANALYTICS</text>
+    <path d="M621 157H655Q672 157 672 174V198H711M621 254H655Q672 254 672 237V219H711" stroke="#748BB8" stroke-opacity=".45" stroke-width="2" stroke-dasharray="5 6"/>
+    <rect x="551" y="132" width="71" height="50" rx="12" fill="#19263D" stroke="#3A4767"/>
+    <rect x="551" y="229" width="71" height="50" rx="12" fill="#19263D" stroke="#3A4767"/>
+    <path d="M568 150L576 157L568 164M583 164H604M568 247L576 254L568 261M583 261H604" stroke="#A7BADB" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="712" y="64" width="508" height="314" rx="18" fill="#0E192D" stroke="#344963"/>
+    <path d="M712 111H1220" stroke="#283951"/>
+    <circle cx="736" cy="88" r="4" fill="#6E80A0"/><circle cx="751" cy="88" r="4" fill="#6E80A0"/><circle cx="766" cy="88" r="4" fill="#6E80A0"/>
+    <text x="793" y="93" fill="#B5C5DF" font-size="12" letter-spacing="1">WORKSPACE OVERVIEW</text>
+    <circle cx="1162" cy="88" r="4" fill="#52E0C0"/><text x="1173" y="92" fill="#7E9FAD" font-size="10">SSH</text>
+    <rect x="736" y="132" width="140" height="63" rx="9" fill="#18253D"/>
+    <rect x="888" y="132" width="140" height="63" rx="9" fill="#18253D"/>
+    <rect x="1040" y="132" width="156" height="63" rx="9" fill="#18253D"/>
+    <text x="750" y="153" fill="#8FA4C3" font-size="10" letter-spacing="1">USAGE</text>
+    <text x="902" y="153" fill="#8FA4C3" font-size="10" letter-spacing="1">LIMITS</text>
+    <text x="1054" y="153" fill="#8FA4C3" font-size="10" letter-spacing="1">COSTS</text>
+    <path d="M750 179H759V174H768V178H777V168H786V172H795V162H808" stroke="#A79CFF" stroke-width="2" stroke-linejoin="round"/>
+    <rect x="902" y="169" width="108" height="6" rx="3" fill="#304058"/><rect x="902" y="169" width="73" height="6" rx="3" fill="#52E0C0"/>
+    <path d="M1054 173H1069M1078 173H1093M1102 173H1117" stroke="#90B8EF" stroke-width="5" stroke-linecap="round"/>
+    <path d="M736 236H1196M736 273H1196M736 310H1196" stroke="#263750" stroke-dasharray="3 5"/>
+    <path d="M739 300L781 286L823 292L865 268L907 279L949 250L991 258L1033 226L1075 239L1117 215L1159 226L1193 210V327H739Z" fill="url(#area)"/>
+    <path d="M739 300L781 286L823 292L865 268L907 279L949 250L991 258L1033 226L1075 239L1117 215L1159 226L1193 210" stroke="url(#accent)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="1193" cy="210" r="5" fill="#52E0C0" stroke="#0E192D" stroke-width="2"/>
+    <text x="737" y="353" fill="#8498B8" font-size="11">Collect</text><text x="892" y="353" fill="#8498B8" font-size="11">Understand</text><text x="1084" y="353" fill="#8498B8" font-size="11">Stay informed</text>
+  </g>
+</svg>

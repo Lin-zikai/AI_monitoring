@@ -4,3 +4,7 @@ dist
 secrets/
 *.log
 .local-run/
+.env.*
+!.env.example
+.agents/
+.codex/
