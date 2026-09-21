@@ -1,0 +1,10 @@
+{
+  "allowedDirs": ["/home/alice/.claude", "/data/alice/codex"],
+  "ccusageBin": "/usr/local/bin/ccusage",
+  "expectedCcusageVersion": "20.0.23",
+  "costMode": "auto",
+  "offline": true,
+  "timeoutSeconds": 60,
+  "totalTimeoutSeconds": 105,
+  "allowAccountQueries": false
+}

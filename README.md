@@ -4,6 +4,8 @@
 
 # AI Monitoring
 
+**简体中文** · [English](README.en.md)
+
 **把分散在多台服务器上的 AI 编程用量，汇总成一张清晰的团队账本。**
 
 Claude Code · Codex · 多用户与多服务器 · 用量、额度与账单
@@ -13,7 +15,7 @@ Claude Code · Codex · 多用户与多服务器 · 用量、额度与账单
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql&logoColor=white)](docker-compose.yml)
 [![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker&logoColor=white)](docker-compose.yml)
 
-[功能概览](#功能概览) · [快速部署](#快速部署) · [接入服务器](#接入服务器) · [常见问题](#常见问题) · [运维文档](docs/DEPLOY.md)
+[功能概览](#功能概览) · [快速部署](#快速部署) · [使用示例](#使用示例) · [常见问题](#常见问题) · [运维文档](docs/DEPLOY.md)
 
 </div>
 
@@ -134,6 +136,28 @@ scripts/local-run.sh status
 
 需要限制远端权限时，可以手工部署专用账户，使用 SSH `forced command` 和目录白名单。自动安装、无 root 部署、读取权限及账号额度授权方式见[被采集服务器配置](docs/DEPLOY.md#3-被采集服务器)。
 
+## 使用示例
+
+以一个实验室为例：Alice 在两台服务器使用 Claude Code 和 Codex，Bob 在另一台服务器使用 Codex。将 Alice 的采集目标绑定到同一个平台用户，即可跨服务器汇总她的用量。
+
+| 平台用户 | 服务器 | SSH 登录 | 数据目录 | 数据源 |
+| --- | --- | --- | --- | --- |
+| Alice | `gpu-01` | `alice` | `/home/alice/.claude` | Claude Code |
+| Alice | `cpu-01` | `alice` | `/data/alice/codex` | Codex |
+| Bob | `dev-01` | `bob` | `/home/bob/.codex` | Codex |
+
+上表是虚构示例，需替换为你自己的账户和路径。如果 Alice 当天两台机器分别产生 120 万和 80 万 Token，个人总览将合计显示 200 万 Token。
+
+将 Alice 的月预算设为 **US$100**，再创建“月预算百分比”规则，档位填 **80、100**，可以在采集后的估算费用达到对应档位时收到提醒。SMTP 需先配置完成。
+
+| 示例资源 | 内容 |
+| --- | --- |
+| [完整中文示例](docs/EXAMPLES.md) / [English examples](docs/EXAMPLES.en.md) | 多机接入、自定义目录、预算告警、远端配置与预期结果 |
+| [远端采集配置](examples/collector.config.json) | 同时允许 Claude 默认目录与 Codex 自定义目录，默认关闭账号额度查询 |
+| [月预算告警请求体](examples/monthly-budget-rule.json) | 管理 API 可用的 80% / 100% 月预算规则示例 |
+
+JSON 文件是配置 / 请求体模板，不是演示数据库；不会自动导入用户、服务器或用量。具体使用方式见示例文档。
+
 ## 常见问题
 
 <details>
@@ -212,6 +236,7 @@ AI_monitoring/
 │   ├── migrations/      PostgreSQL 数据库迁移
 │   └── test/            单元与集成测试
 ├── remote/               远端采集脚本与安装工具
+├── examples/             可复用的配置与 API 请求体示例
 ├── scripts/              本机运行工具
 ├── deploy/               Caddy 配置
 ├── docs/                 部署、运维与验收文档
@@ -231,7 +256,7 @@ AI_monitoring/
 
 <div align="center">
 
-[部署与运维](docs/DEPLOY.md) · [设计方案](PROJECT_PLAN.md) · [验收记录](docs/ACCEPTANCE.md) · [反馈问题](https://github.com/Lin-zikai/AI_monitoring/issues)
+[使用示例](docs/EXAMPLES.md) · [English](README.en.md) · [部署与运维](docs/DEPLOY.md) · [设计方案](PROJECT_PLAN.md) · [验收记录](docs/ACCEPTANCE.md) · [反馈问题](https://github.com/Lin-zikai/AI_monitoring/issues)
 
 Built with [ccusage](https://github.com/ryoppippi/ccusage), React, Fastify and PostgreSQL.
 

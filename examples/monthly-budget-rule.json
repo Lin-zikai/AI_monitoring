@@ -1,0 +1,13 @@
+{
+  "name": "Monthly budget 80% / 100%",
+  "metric": "budget_pct",
+  "period": "monthly",
+  "tiers": [80, 100],
+  "source": null,
+  "scopeType": "global",
+  "scopeUserId": null,
+  "scopeTeam": null,
+  "notifyAdmins": true,
+  "extraEmails": [],
+  "enabled": true
+}
